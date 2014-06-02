@@ -6,7 +6,6 @@ import (
 	"log"
 	"sync"
 	"time"
-	"sync/atomic"
 )
 
 // ResourcePool allows you to use a pool of resources.
@@ -14,18 +13,17 @@ type ResourcePool struct {
 	mx        sync.RWMutex
 	min       uint32 // Minimum Available resources
 	inUse     uint32
-	resources chan resourceWrapper
+	resources chan ResourceWrapper
 	resOpen   func() (interface{}, error)
 	resClose  func(interface{}) error
 }
 
-type resourceWrapper struct {
+type ResourceWrapper struct {
 	Resource interface{}
-	timeUsed time.Time
 	p		 *ResourcePool
 }
 
-func (rw resourceWrapper)Close() {
+func (rw ResourceWrapper)Close() {
 	rw.p.Release(rw)
 }
 
@@ -37,7 +35,7 @@ func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(inter
 	p := new(ResourcePool)
 	p.min = min
 
-	p.resources = make(chan resourceWrapper, max)
+	p.resources = make(chan ResourceWrapper, max)
 	p.resOpen = o
 	p.resClose = c
 
@@ -46,30 +44,28 @@ func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(inter
 	for i := uint32(0); i < min; i++ {
 		resource, err := p.resOpen()
 		if err == nil {
-			wrapper := resourceWrapper{p:p, Resource:resource}
+			wrapper := ResourceWrapper{p:p, Resource:resource}
 			p.resources <- wrapper
 		} else {
 			break
 		}
 	}
 
-	for i := uint32(0); i < max-min; i++ {
-		p.resources <- resourceWrapper{p:p}
-	}
-
 	return p, err
 }
 
 func (p *ResourcePool) add() (err error) {
+
 	p.mx.Lock()
 	defer p.mx.Unlock()
 
 	// make sure we are not going over limit
-	if p.Cap() > p.Count() {
+	//our max > total including outstanding
+	if p.iCap() > p.iCount() {
 		resource, err := p.resOpen()
 		var ok bool
 		if err == nil {
-			wrapper := resourceWrapper{p:p, Resource:resource}
+			wrapper := ResourceWrapper{p:p, Resource:resource}
 			if ok {
 				p.resources <- wrapper
 			}
@@ -81,100 +77,108 @@ func (p *ResourcePool) add() (err error) {
 // Get will return the next available resource. If capacity
 // has not been reached, it will create a new one using the factory. Otherwise,
 // it will indefinitely wait untill the next resource becomes available.
-func (p *ResourcePool) Get() (resource resourceWrapper, err error) {
+func (p *ResourcePool) Get() (resource ResourceWrapper, err error) {
 	return p.get()
 }
 
 // Fetch a new resource
-func (p *ResourcePool) get() (resource resourceWrapper, err error) {
+func (p *ResourcePool) get() (resource ResourceWrapper, err error) {
+
 	p.mx.Lock()
 	defer p.mx.Unlock()
 
-	wrapper := resourceWrapper{p:p}
+	wrapper := ResourceWrapper{p:p}
 	var ok bool
 	for {
 
-		///Lets wait on a resource
-		if p.AvailableNow() != 0 {
-			select {
-			case wrapper, ok = <-p.resources:
+		///Lets get a resource if we have some sitting around
+		if p.iAvailableNow() > 0 {
 
-			default:
-				panic("resource not available")
-			}
-
+			wrapper, ok = <-p.resources
 			if !ok {
 				return wrapper, fmt.Errorf("ResourcePool is closed")
 			}
-
 			break
 
-		//Lets create a resource
-		} else if p.AvailableMax() != 0 {
+		//nothing current available. Lets push a new resource onto the pool
+		//if our cap > total outstanding
+		} else if p.iAvailableMax() > 0 {
 
 			wrapper.Resource, err = p.resOpen()
-			if err == nil {
-				p.resources <- wrapper
-				break
-			} else {
-				fmt.Println("failed to open resource", err.Error())
+			if err != nil {
+				//just in case
+				wrapper.Resource = nil
+				return wrapper, err
 			}
+
+			break
 		}
+
+
+		time.Sleep(time.Microsecond)
 	}
 
-	//if current available < MIN &&
-	if p.AvailableNow() < p.min && p.Cap() > p.Count() {
+	//incase a resource is destroyed
+	//if our current available < min && our total outstanding is not less than our cap
+	if p.iAvailableNow() < p.min && p.iCap() > p.iCount() {
 		go p.add()
 	}
 
-	atomic.AddUint32(&p.inUse, 1)
+	p.inUse++
 	return wrapper, err
 }
 
 /*
  * Returns a resource back in to the Pool
  */
-func (p *ResourcePool) Release(wrapper resourceWrapper) {
+func (p *ResourcePool) Release(wrapper ResourceWrapper) {
+
 	p.mx.Lock()
 	defer p.mx.Unlock()
 
 	//remove resource from pool
-	if p.AvailableNow() > p.min {
+	if p.iAvailableNow() >= p.min {
+
 		if err := p.resClose(wrapper.Resource); err != nil {
 			log.Println("Resource close error: ", err)
-		} else {
-			//AddUint32(&x, ^uint32(0))
-			atomic.AddUint32(&p.inUse, ^uint32(0))
 		}
 
-	//put resource back into pool
+		p.inUse--
+
 	} else {
+
 		p.resources <- wrapper
-		atomic.AddUint32(&p.inUse, ^uint32(0))
+		p.inUse--
 	}
 }
 
 /*
  * Remove a resource from the Pool.  This is helpful if the resource
- * has gone bad.  A new resource will be created in it's place.
+ * has gone bad.  A new resource will be created in it's place. because of add.
  */
-func (p *ResourcePool) Destroy(wrapper resourceWrapper) {
+func (p *ResourcePool) Destroy(wrapper ResourceWrapper) {
+
 	p.mx.Lock()
 	defer p.mx.Unlock()
+
 	if err := p.resClose(wrapper.Resource); err != nil {
 		log.Println("Resource close error: ", err)
 	} else {
-		atomic.AddUint32(&p.inUse, ^uint32(0))
+		p.inUse--
 	}
 }
 
 // Remove all resources from the Pool.
 // Then close the pool.
 func (p *ResourcePool) Close() {
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
 	for {
 		select {
 		case resource := <-p.resources:
-			p.resClose(resource)
+			p.resClose(resource.Resource)
 		default:
 			close(p.resources)
 			return
@@ -182,34 +186,93 @@ func (p *ResourcePool) Close() {
 	}
 }
 
-// Resources already obtained and available for use
-func (p *ResourcePool) AvailableNow() uint32 {
+
+func (p *ResourcePool) iAvailableNow() uint32 {
 	return uint32(len(p.resources))
 }
 
-// Total # of resoureces including the once we haven't yet created - whats in use
+// Resources already obtained and available for use
+func (p *ResourcePool) AvailableNow() uint32 {
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	out := uint32(len(p.resources))
+	return out
+}
+
+func (p *ResourcePool) iAvailableMax() uint32 {
+	return p.iCap() - p.iInUse()
+}
+
+// Total # of resoureces including the ones we haven't yet created - whats in use
 func (p *ResourcePool) AvailableMax() uint32 {
-	return p.Cap() - p.InUse()
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	out := p.iCap() - p.iInUse()
+	return out
+}
+
+func (p *ResourcePool) iCount() uint32 {
+	return p.iInUse() + p.iAvailableNow()
 }
 
 // Count of resources open (should be less than Cap())
 func (p *ResourcePool) Count() uint32 {
-	return p.InUse() + p.AvailableNow()
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	out := p.iInUse() + p.iAvailableNow()
+	return out
+}
+
+func (p *ResourcePool) iInUse() uint32 {
+	return p.inUse;
 }
 
 // Resources being used right now
 func (p *ResourcePool) InUse() uint32 {
-	return atomic.LoadUint32(&p.inUse)
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	out := p.inUse
+	return out
+}
+
+func (p *ResourcePool) iCap() uint32 {
+	return uint32(cap(p.resources));
 }
 
 // Max resources the pool allows; all in use, obtained, and not obtained.
 func (p *ResourcePool) Cap() uint32 {
-	return uint32(cap(p.resources))
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	out := uint32(cap(p.resources))
+	return out
+}
+
+func (p *ResourcePool) Stats() string {
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	out := fmt.Sprintf("AvailableNow:%d AvailableMax:%d Count:%d, InUse:%d, Cap:%d", p.iAvailableNow(), p.iAvailableMax(), p.iCount(), p.iInUse(), p.iCap())
+	return out
 }
 
 // Reterns how many resources we need to add to the pool, to get the reserve to reach min
 func (p *ResourcePool) Short() (need uint32) {
-	an := p.AvailableNow()
+
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	an := p.iAvailableNow()
 	if an < p.min {
 		need = p.min - an
 	}
