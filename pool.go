@@ -186,11 +186,32 @@ func (p *ResourcePool) Close() {
 	}
 }
 
-
+/**
+Unsynced Accesss
+ */
 func (p *ResourcePool) iAvailableNow() uint32 {
 	return uint32(len(p.resources))
 }
 
+func (p *ResourcePool) iAvailableMax() uint32 {
+	return p.iCap() - p.iInUse()
+}
+
+func (p *ResourcePool) iCount() uint32 {
+	return p.iInUse() + p.iAvailableNow()
+}
+
+func (p *ResourcePool) iInUse() uint32 {
+	return p.inUse;
+}
+
+func (p *ResourcePool) iCap() uint32 {
+	return uint32(cap(p.resources));
+}
+
+/*
+Synced Access
+ */
 // Resources already obtained and available for use
 func (p *ResourcePool) AvailableNow() uint32 {
 
@@ -201,9 +222,6 @@ func (p *ResourcePool) AvailableNow() uint32 {
 	return out
 }
 
-func (p *ResourcePool) iAvailableMax() uint32 {
-	return p.iCap() - p.iInUse()
-}
 
 // Total # of resoureces including the ones we haven't yet created - whats in use
 func (p *ResourcePool) AvailableMax() uint32 {
@@ -213,10 +231,6 @@ func (p *ResourcePool) AvailableMax() uint32 {
 
 	out := p.iCap() - p.iInUse()
 	return out
-}
-
-func (p *ResourcePool) iCount() uint32 {
-	return p.iInUse() + p.iAvailableNow()
 }
 
 // Count of resources open (should be less than Cap())
@@ -229,10 +243,6 @@ func (p *ResourcePool) Count() uint32 {
 	return out
 }
 
-func (p *ResourcePool) iInUse() uint32 {
-	return p.inUse;
-}
-
 // Resources being used right now
 func (p *ResourcePool) InUse() uint32 {
 
@@ -241,10 +251,6 @@ func (p *ResourcePool) InUse() uint32 {
 
 	out := p.inUse
 	return out
-}
-
-func (p *ResourcePool) iCap() uint32 {
-	return uint32(cap(p.resources));
 }
 
 // Max resources the pool allows; all in use, obtained, and not obtained.
