@@ -37,11 +37,10 @@ func TestIntialize(t *testing.T) {
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
-	err = Register("db", 2, 5, create, destroy)
+	p, err := NewPool(2, 5, create, destroy)
 	if err != nil {
 		t.Errorf("Resource error: %s", err.Error())
 	}
-	p := Name("db")
 	msg, err := p.Get()
 	if err != nil {
 		t.Errorf("Get Resource error: %s", err.Error())
@@ -61,11 +60,11 @@ func TestResourceRelease(t *testing.T) {
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
-	var min, max uint
+	var min, max uint32
 	min = 10
 	max = 50
-	err = Register("db", min, max, create, destroy)
-	p := Name("db")
+	p, err := NewPool(min, max, create, destroy)
+
 	if p.Cap() != max {
 		t.Errorf("Pool size incorrect. Should be %d but is %d", max, len(p.resources))
 	}
@@ -81,8 +80,8 @@ func TestResourceRelease(t *testing.T) {
 		t.Errorf("Pool size incorrect. Should be %d but is %d", max-1, p.AvailableNow())
 	}
 
-	var dbuse = make(map[uint]resourceWrapper)
-	for i := uint(0); i < max; i++ {
+	var dbuse = make(map[uint32]resourceWrapper)
+	for i := uint32(0); i < max; i++ {
 		dbuse[i], err = p.Get()
 		if err != nil {
 			t.Errorf("get error %d", err)
@@ -97,8 +96,8 @@ func TestResourceRelease(t *testing.T) {
 	}
 
 	// pools test
-	po := uint(60)
-	for i := uint(0); i < po; i++ {
+	po := uint32(60)
+	for i := uint32(0); i < po; i++ {
 		dbuse[i], err = p.Get()
 		if err != nil {
 			t.Errorf("get error %d", err)
@@ -110,7 +109,7 @@ func TestResourceRelease(t *testing.T) {
 	if p.AvailableMax() != p.Cap()-po {
 		t.Errorf("Pool AvailableMax() incorrect. Should be  %d but is %d", max-po, p.AvailableMax())
 	}
-	for i := uint(0); i < po; i++ {
+	for i := uint32(0); i < po; i++ {
 		p.Release(dbuse[i])
 	}
 	if p.InUse() != 0 {
@@ -128,8 +127,9 @@ func TestResourceRelease(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	name := "db"
-	var min, max uint
+
+
+	var min, max uint32
 	min = 10
 	max = 50
 	var i int
@@ -143,10 +143,10 @@ func TestClose(t *testing.T) {
 		i++
 		return db.resourceDel()
 	}
-	err = Register(name, min, max, create, destroy)
-	p := Name(name)
+
+	p, err := NewPool(min, max, create, destroy)
 	count := int(p.Count())
-	p.Close(name)
+	p.Close()
 	if i != count {
 		t.Errorf("Close was not called correct times. It was called %d and should have been called  %d times", i, count)
 	}
