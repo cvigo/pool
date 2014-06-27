@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+type ResourceExhaustedError struct {
+
+};
+
+func (e ResourceExhaustedError) Error() string { return "No resources available" }
+
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
 	mx        sync.RWMutex
@@ -78,44 +84,61 @@ func (p *ResourcePool) add() (err error) {
 // has not been reached, it will create a new one using the factory. Otherwise,
 // it will indefinitely wait untill the next resource becomes available.
 func (p *ResourcePool) Get() (resource ResourceWrapper, err error) {
-	return p.get()
+	return p.getWait()
 }
 
-// Fetch a new resource
-func (p *ResourcePool) get() (resource ResourceWrapper, err error) {
+// Fetch a new resource and wait if none are available
+func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
+
+	for {
+
+		r,e := p.getAvailable()
+
+		if e != nil {
+			if _, isResourceExhausted := e.(ResourceExhaustedError); isResourceExhausted == true {
+				time.Sleep(time.Microsecond)
+				continue;
+			}
+		}
+
+		return r,e
+	}
+
+}
+
+// Fetch / create a new resource if available
+func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 
 	p.mx.Lock()
 	defer p.mx.Unlock()
 
 	wrapper := ResourceWrapper{p:p}
 	var ok bool
-	for {
 
-		///Lets get a resource if we have some sitting around
-		if p.iAvailableNow() > 0 {
+	///Lets get a resource if we have some sitting around
+	if p.iAvailableNow() > 0 {
 
-			wrapper, ok = <-p.resources
-			if !ok {
-				return wrapper, fmt.Errorf("ResourcePool is closed")
-			}
-			break
-
-		//nothing current available. Lets push a new resource onto the pool
-		//if our cap > total outstanding
-		} else if p.iAvailableMax() > 0 {
-
-			wrapper.Resource, err = p.resOpen()
-			if err != nil {
-				//just in case
-				wrapper.Resource = nil
-				return wrapper, err
-			}
-
-			break
+		wrapper, ok = <-p.resources
+		if !ok {
+			return wrapper, fmt.Errorf("ResourcePool is closed")
 		}
 
+	//nothing current available. Lets push a new resource onto the pool
+	//if our cap > total outstanding
+	} else if p.iAvailableMax() > 0 {
 
-		time.Sleep(time.Microsecond)
+		wrapper.Resource, err = p.resOpen()
+		if err != nil {
+
+			//just in case
+			wrapper.Resource = nil
+			return wrapper, err
+		}
+
+	//We have exhausted our resources
+	} else {
+
+		return wrapper, ResourceExhaustedError{}
 	}
 
 	//incase a resource is destroyed

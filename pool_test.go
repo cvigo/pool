@@ -50,6 +50,69 @@ func TestIntialize(t *testing.T) {
 	}
 }
 
+func TestBeyond(t *testing.T) {
+
+	var db *resource_symulator
+	var err error
+	create := func() (interface{}, error) {
+		db, err = resourceNew()
+		return db, err
+	}
+	destroy := func(r interface{}) error {
+		return db.resourceDel()
+	}
+	p, err := NewPool(2, 5, create, destroy)
+	if err != nil {
+		t.Fatalf("Resource error: %s", err.Error())
+	}
+
+	_, err = p.getAvailable()
+	_, err = p.getAvailable()
+	_, err = p.getAvailable()
+	_, err = p.getAvailable()
+	_, err = p.getAvailable()
+	_, err = p.getAvailable()
+
+	if err == nil {
+		t.Fatalf("Must error on sixth get")
+	}
+
+	if _, isResourceExhausted := err.(ResourceExhaustedError); isResourceExhausted == false {
+		t.Fatalf("Error must be ResourceExhaustedError")
+	}
+}
+
+func TestWait(t *testing.T) {
+
+	var db *resource_symulator
+	var err error
+	create := func() (interface{}, error) {
+		db, err = resourceNew()
+		return db, err
+	}
+	destroy := func(r interface{}) error {
+		return db.resourceDel()
+	}
+	p, err := NewPool(2, 5, create, destroy)
+	if err != nil {
+		t.Fatalf("Resource error: %s", err.Error())
+	}
+
+	_, err = p.Get()
+	_, err = p.Get()
+	_, err = p.Get()
+	_, err = p.Get()
+	msg, err := p.Get()
+
+	go func() {
+		msg.Close()
+	}();
+
+	msg, err = p.Get()
+
+}
+
+
 func TestResourceRelease(t *testing.T) {
 	var db *resource_symulator
 	var err error
@@ -69,7 +132,7 @@ func TestResourceRelease(t *testing.T) {
 		t.Fatalf("Cap size incorrect. Should be %d but is %d", max, cap(p.resources))
 	}
 
-	msg, err := p.get()
+	msg, err := p.Get()
 	if err != nil {
 		t.Fatalf("get error %d", err)
 	}
