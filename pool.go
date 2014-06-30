@@ -20,8 +20,9 @@ type ResourcePool struct {
 	min       uint32 // Minimum Available resources
 	inUse     uint32
 	resources chan ResourceWrapper
-	resOpen   func() (interface{}, error)
-	resClose  func(interface{}) error
+	resOpen   func()(interface{}, error)
+	resClose  func(interface{})(error)
+	resTest   func(interface{})(error)
 }
 
 type ResourceWrapper struct {
@@ -36,7 +37,7 @@ func (rw ResourceWrapper)Close() {
 /*
  * Creates a new resource Pool
  */
-func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(interface{}) error) (*ResourcePool, error) {
+func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(interface{}) error, t func(interface{}) error) (*ResourcePool, error) {
 
 	p := new(ResourcePool)
 	p.min = min
@@ -44,6 +45,7 @@ func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(inter
 	p.resources = make(chan ResourceWrapper, max)
 	p.resOpen = o
 	p.resClose = c
+	p.resTest = t
 
 	var err error
 
@@ -121,6 +123,12 @@ func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 		wrapper, ok = <-p.resources
 		if !ok {
 			return wrapper, fmt.Errorf("ResourcePool is closed")
+		}
+
+		//make sure the resource is still okay
+		if p.resTest(wrapper.Resource) != nil {
+			p.resClose(wrapper.Resource)
+			wrapper.Resource, err = p.resOpen()
 		}
 
 	//nothing current available. Lets push a new resource onto the pool

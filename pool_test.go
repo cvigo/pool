@@ -30,14 +30,21 @@ func (r *resource_symulator) resourceDel() (err error) {
 func TestIntialize(t *testing.T) {
 	var db *resource_symulator
 	var err error
+
 	create := func() (interface{}, error) {
 		db, err = resourceNew()
 		return db, err
 	}
+
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
-	p, err := NewPool(2, 5, create, destroy)
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, err := NewPool(2, 5, create, destroy, test)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -61,7 +68,12 @@ func TestBeyond(t *testing.T) {
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
-	p, err := NewPool(2, 5, create, destroy)
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, err := NewPool(2, 5, create, destroy, test)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -90,10 +102,16 @@ func TestWait(t *testing.T) {
 		db, err = resourceNew()
 		return db, err
 	}
+
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
-	p, err := NewPool(2, 5, create, destroy)
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, err := NewPool(2, 5, create, destroy, test)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -123,10 +141,14 @@ func TestResourceRelease(t *testing.T) {
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
+	test := func(r interface{}) error {
+		return nil
+	}
+
 	var min, max uint32
 	min = 10
 	max = 50
-	p, err := NewPool(min, max, create, destroy)
+	p, err := NewPool(min, max, create, destroy, test)
 
 	if p.Cap() != max {
 		t.Fatalf("Cap size incorrect. Should be %d but is %d", max, cap(p.resources))
@@ -196,7 +218,6 @@ func TestResourceRelease(t *testing.T) {
 
 func TestClose(t *testing.T) {
 
-
 	var min, max uint32
 	min = 10
 	max = 50
@@ -211,8 +232,11 @@ func TestClose(t *testing.T) {
 		i++
 		return db.resourceDel()
 	}
+	test := func(r interface{}) error {
+		return nil
+	}
 
-	p, err := NewPool(min, max, create, destroy)
+	p, err := NewPool(min, max, create, destroy, test)
 	count := int(p.Count())
 	p.Close()
 	if i != count {
