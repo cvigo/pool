@@ -16,9 +16,11 @@ func (e ResourceExhaustedError) Error() string { return "No resources available"
 
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
+
 	mx        sync.RWMutex
 	min       uint32 // Minimum Available resources
 	inUse     uint32
+
 	resources chan ResourceWrapper
 	resOpen   func()(interface{}, error)
 	resClose  func(interface{})(error)
@@ -69,14 +71,12 @@ func (p *ResourcePool) add() (err error) {
 
 	// make sure we are not going over limit
 	//our max > total including outstanding
-	if p.iCap() > p.iCount() {
+	for p.iAvailableNow() < p.min && p.iCap() > p.iCount() {
+
 		resource, err := p.resOpen()
-		var ok bool
 		if err == nil {
 			wrapper := ResourceWrapper{p:p, Resource:resource}
-			if ok {
-				p.resources <- wrapper
-			}
+			p.resources <- wrapper
 		}
 	}
 	return
@@ -125,6 +125,7 @@ func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 			return wrapper, fmt.Errorf("ResourcePool is closed")
 		}
 
+
 		//make sure the resource is still okay
 		if p.resTest(wrapper.Resource) != nil {
 			p.resClose(wrapper.Resource)
@@ -149,13 +150,14 @@ func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 		return wrapper, ResourceExhaustedError{}
 	}
 
+	p.inUse++
+
 	//incase a resource is destroyed
 	//if our current available < min && our total outstanding is not less than our cap
 	if p.iAvailableNow() < p.min && p.iCap() > p.iCount() {
 		go p.add()
 	}
 
-	p.inUse++
 	return wrapper, err
 }
 
@@ -221,7 +223,7 @@ func (p *ResourcePool) Close() {
 Unsynced Accesss
  */
 func (p *ResourcePool) iAvailableNow() uint32 {
-	return uint32(len(p.resources))
+	return uint32(len(p.resources))//p.available
 }
 
 func (p *ResourcePool) iAvailableMax() uint32 {

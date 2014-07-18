@@ -3,20 +3,22 @@ package pool
 import (
 	"testing"
 	"time"
+	"sync/atomic"
+	"sync"
 )
 
 var (
-	no int
+	no int32
 )
 
 type resource_symulator struct {
-	id int
+	id int32
 }
 
 func resourceNew() (r *resource_symulator, err error) {
-	no++
+
 	r = new(resource_symulator)
-	r.id = no
+	r.id = atomic.AddInt32(&no, 1)
 	time.Sleep(time.Microsecond * 1)
 	return
 }
@@ -130,17 +132,72 @@ func TestWait(t *testing.T) {
 
 }
 
+func TestExcluse(t *testing.T) {
 
-func TestResourceRelease(t *testing.T) {
 	var db *resource_symulator
 	var err error
+
 	create := func() (interface{}, error) {
 		db, err = resourceNew()
 		return db, err
 	}
+
 	destroy := func(r interface{}) error {
 		return db.resourceDel()
 	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	var min, max uint32
+	min = 10
+	max = 50
+
+	no = 0
+	p, err := NewPool(min, max, create, destroy, test)
+
+	var waitgroup sync.WaitGroup
+	check := make(map[int32]bool)
+
+	for i := 0; i < 40; i++ {
+
+		waitgroup.Add(1)
+		go func(index int32) {
+
+			defer waitgroup.Done()
+			obj, _ := p.Get()
+			casted := obj.Resource.(*resource_symulator)
+			check[casted.id] = true
+
+		}(int32(i))
+	}
+
+	waitgroup.Wait()
+
+	for i := 1; i <= 40; i++ {
+		if check[int32(i)] == false {
+			t.Fatalf("Resource %d unused", i)
+		}
+	}
+
+	p.Close()
+}
+
+func TestResourceRelease(t *testing.T) {
+
+	var db *resource_symulator
+	var err error
+
+	create := func() (interface{}, error) {
+		db, err = resourceNew()
+		return db, err
+	}
+
+	destroy := func(r interface{}) error {
+		return db.resourceDel()
+	}
+
 	test := func(r interface{}) error {
 		return nil
 	}
