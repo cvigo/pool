@@ -2,17 +2,14 @@
 package pool
 
 import (
-	"fmt"
+	"errors"
 	"log"
 	"sync"
 	"time"
 )
 
-type ResourceExhaustedError struct {
-
-};
-
-func (e ResourceExhaustedError) Error() string { return "No resources available" }
+var ResourceExhaustedError = errors.New("No Resources Available")
+var PoolClosedError = errors.New("Pool is closed")
 
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
@@ -30,9 +27,16 @@ type ResourcePool struct {
 type ResourceWrapper struct {
 	Resource interface{}
 	p		 *ResourcePool
+	e		 error
 }
 
 func (rw ResourceWrapper)Close() {
+
+	if rw.e != nil {
+		log.Println("Can't close a bum resource")
+		return
+	}
+
 	rw.p.Release(rw)
 }
 
@@ -71,15 +75,18 @@ func (p *ResourcePool) add() (err error) {
 
 	// make sure we are not going over limit
 	//our max > total including outstanding
-	for p.iAvailableNow() < p.min && p.iCap() > p.iCount() {
+	for p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen() {
 
 		resource, err := p.resOpen()
 		if err == nil {
 			wrapper := ResourceWrapper{p:p, Resource:resource}
 			p.resources <- wrapper
+		} else {
+			return err
 		}
 	}
-	return
+
+	return nil
 }
 
 // Get will return the next available resource. If capacity
@@ -96,11 +103,9 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 
 		r,e := p.getAvailable()
 
-		if e != nil {
-			if _, isResourceExhausted := e.(ResourceExhaustedError); isResourceExhausted == true {
-				time.Sleep(time.Microsecond)
-				continue;
-			}
+		if e == ResourceExhaustedError {
+			time.Sleep(time.Microsecond)
+			continue;
 		}
 
 		return r,e
@@ -122,11 +127,11 @@ func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 
 		wrapper, ok = <-p.resources
 		if !ok {
-			return wrapper, fmt.Errorf("ResourcePool is closed")
+			return wrapper, PoolClosedError
 		}
 
-
 		//make sure the resource is still okay
+		//if not get a new resource
 		if p.resTest(wrapper.Resource) != nil {
 			p.resClose(wrapper.Resource)
 			wrapper.Resource, err = p.resOpen()
@@ -137,24 +142,27 @@ func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 	} else if p.iAvailableMax() > 0 {
 
 		wrapper.Resource, err = p.resOpen()
-		if err != nil {
-
-			//just in case
-			wrapper.Resource = nil
-			return wrapper, err
-		}
 
 	//We have exhausted our resources
 	} else {
 
-		return wrapper, ResourceExhaustedError{}
+		return wrapper, ResourceExhaustedError
 	}
 
+	//if we couldn't get a good resource lets return the error
+	if err != nil {
+		//just in case
+		wrapper.Resource = nil
+		wrapper.e = err
+		return wrapper, err
+	}
+
+	//outstanding resources++
 	p.inUse++
 
 	//incase a resource is destroyed
 	//if our current available < min && our total outstanding is not less than our cap
-	if p.iAvailableNow() < p.min && p.iCap() > p.iCount() {
+	if p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen() {
 		go p.add()
 	}
 
@@ -176,13 +184,14 @@ func (p *ResourcePool) Release(wrapper ResourceWrapper) {
 			log.Println("Resource close error: ", err)
 		}
 
-		p.inUse--
-
 	} else {
 
+		//put it back in the available resources queue
 		p.resources <- wrapper
-		p.inUse--
 	}
+
+	//decriment how many outstanding resources we have
+	p.inUse--
 }
 
 /*
@@ -195,10 +204,10 @@ func (p *ResourcePool) Destroy(wrapper ResourceWrapper) {
 	defer p.mx.Unlock()
 
 	if err := p.resClose(wrapper.Resource); err != nil {
-		log.Println("Resource close error: ", err)
-	} else {
-		p.inUse--
+		log.Println("Resource couldn't close: ", err)
 	}
+
+	p.inUse--
 }
 
 // Remove all resources from the Pool.
@@ -230,7 +239,7 @@ func (p *ResourcePool) iAvailableMax() uint32 {
 	return p.iCap() - p.iInUse()
 }
 
-func (p *ResourcePool) iCount() uint32 {
+func (p *ResourcePool) iResourcesOpen() uint32 {
 	return p.iInUse() + p.iAvailableNow()
 }
 
@@ -266,8 +275,8 @@ func (p *ResourcePool) AvailableMax() uint32 {
 	return out
 }
 
-// Count of resources open (should be less than Cap())
-func (p *ResourcePool) Count() uint32 {
+// number of open resources (should be less than Cap())
+func (p *ResourcePool) ResourcesOpen() uint32 {
 
 	p.mx.Lock()
 	defer p.mx.Unlock()
@@ -296,12 +305,20 @@ func (p *ResourcePool) Cap() uint32 {
 	return out
 }
 
-func (p *ResourcePool) Stats() string {
+type ResourcePoolStat struct {
+	AvailableNow uint32
+	AvailableMax uint32
+	ResourcesOpen uint32
+	InUse uint32
+	Cap uint32
+}
+
+func (p *ResourcePool) Stats() ResourcePoolStat {
 
 	p.mx.Lock()
 	defer p.mx.Unlock()
 
-	out := fmt.Sprintf("AvailableNow:%d AvailableMax:%d Count:%d, InUse:%d, Cap:%d", p.iAvailableNow(), p.iAvailableMax(), p.iCount(), p.iInUse(), p.iCap())
+	out := ResourcePoolStat{AvailableNow:p.iAvailableNow(), AvailableMax:p.iAvailableMax(), ResourcesOpen:p.iResourcesOpen(), InUse:p.iInUse(), Cap:p.iCap()}
 	return out
 }
 

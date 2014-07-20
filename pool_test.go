@@ -5,6 +5,7 @@ import (
 	"time"
 	"sync/atomic"
 	"sync"
+	"errors"
 )
 
 var (
@@ -30,15 +31,14 @@ func (r *resource_symulator) resourceDel() (err error) {
 }
 
 func TestIntialize(t *testing.T) {
-	var db *resource_symulator
-	var err error
 
+	var err error
 	create := func() (interface{}, error) {
-		db, err = resourceNew()
-		return db, err
+		return resourceNew()
 	}
 
 	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
 		return db.resourceDel()
 	}
 
@@ -50,10 +50,12 @@ func TestIntialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
+
 	msg, err := p.Get()
 	if err != nil {
 		t.Fatalf("Get Resource error: %s", err.Error())
 	}
+
 	if msg.Resource.(*resource_symulator).id != 1 {
 		t.Fatalf("Resource id should be on = %d", msg)
 	}
@@ -61,13 +63,12 @@ func TestIntialize(t *testing.T) {
 
 func TestBeyond(t *testing.T) {
 
-	var db *resource_symulator
 	var err error
 	create := func() (interface{}, error) {
-		db, err = resourceNew()
-		return db, err
+		return resourceNew()
 	}
 	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
 		return db.resourceDel()
 	}
 
@@ -91,21 +92,21 @@ func TestBeyond(t *testing.T) {
 		t.Fatalf("Must error on sixth get")
 	}
 
-	if _, isResourceExhausted := err.(ResourceExhaustedError); isResourceExhausted == false {
+	if err != ResourceExhaustedError {
 		t.Fatalf("Error must be ResourceExhaustedError")
 	}
 }
 
 func TestWait(t *testing.T) {
 
-	var db *resource_symulator
 	var err error
+
 	create := func() (interface{}, error) {
-		db, err = resourceNew()
-		return db, err
+		return resourceNew()
 	}
 
 	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
 		return db.resourceDel()
 	}
 
@@ -134,15 +135,12 @@ func TestWait(t *testing.T) {
 
 func TestExcluse(t *testing.T) {
 
-	var db *resource_symulator
-	var err error
-
 	create := func() (interface{}, error) {
-		db, err = resourceNew()
-		return db, err
+		return resourceNew()
 	}
 
 	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
 		return db.resourceDel()
 	}
 
@@ -156,6 +154,9 @@ func TestExcluse(t *testing.T) {
 
 	no = 0
 	p, err := NewPool(min, max, create, destroy, test)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var waitgroup sync.WaitGroup
 	check := make(map[int32]bool)
@@ -186,15 +187,14 @@ func TestExcluse(t *testing.T) {
 
 func TestResourceRelease(t *testing.T) {
 
-	var db *resource_symulator
 	var err error
 
 	create := func() (interface{}, error) {
-		db, err = resourceNew()
-		return db, err
+		return resourceNew()
 	}
 
 	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
 		return db.resourceDel()
 	}
 
@@ -250,15 +250,28 @@ func TestResourceRelease(t *testing.T) {
 		}
 	}
 
+	stat := p.Stats()
+
 	if p.InUse() != po {
 		t.Fatalf("Pool InUse() before release incorrect. Should be 0 but is %d", p.InUse())
 	}
+
+	if stat.InUse != po {
+		t.Fatalf("Pool InUse() before release incorrect. Should be 0 but is %d", p.InUse())
+	}
+
 	if p.AvailableMax() != p.Cap()-po {
 		t.Fatalf("Pool AvailableMax() incorrect. Should be  %d but is %d", max-po, p.AvailableMax())
 	}
+
+	if stat.AvailableMax != p.Cap()-po {
+		t.Fatalf("Pool AvailableMax() incorrect. Should be  %d but is %d", max-po, p.AvailableMax())
+	}
+
 	for i := uint32(0); i < po; i++ {
 		p.Release(dbuse[i])
 	}
+
 	if p.InUse() != 0 {
 		t.Fatalf("Pool InUse() incorrect. Should be 0 but is %d", p.InUse())
 	}
@@ -279,24 +292,117 @@ func TestClose(t *testing.T) {
 	min = 10
 	max = 50
 	var i int
-	var db *resource_symulator
-	var err error
+
 	create := func() (interface{}, error) {
-		db, err = resourceNew()
-		return db, err
+		return resourceNew()
 	}
 	destroy := func(r interface{}) error {
 		i++
+		db := r.(*resource_symulator)
 		return db.resourceDel()
 	}
 	test := func(r interface{}) error {
 		return nil
 	}
 
-	p, err := NewPool(min, max, create, destroy, test)
-	count := int(p.Count())
+	p, _ := NewPool(min, max, create, destroy, test)
+	count := int(p.ResourcesOpen())
 	p.Close()
 	if i != count {
 		t.Errorf("Close was not called correct times. It was called %d and should have been called  %d times", i, count)
 	}
 }
+
+func TestError(t *testing.T) {
+
+	var min, max uint32
+	min = 10
+	max = 50
+	var i int = 0
+
+	create := func() (interface{}, error) {
+
+		if i % 2 == 2 {
+			return resourceNew()
+		}
+
+		i++
+		return nil, errors.New("Some error")
+	}
+
+	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
+		return db.resourceDel()
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, err := NewPool(min, max, create, destroy, test)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = p.Get()
+	if err == nil {
+		t.Fatal("Expected Error")
+	}
+
+	for index := 0; uint32(index) < max; index++ {
+		r, err := p.Get()
+		if err == nil {
+			go r.Close()
+		}
+	}
+
+}
+
+
+func TestTest(t *testing.T) {
+
+	var min, max uint32
+	min = 0
+	max = 50
+	var i int = 0
+
+	create := func() (interface{}, error) {
+		i++
+		return resourceNew()
+	}
+
+	destroy := func(r interface{}) error {
+		db := r.(*resource_symulator)
+		return db.resourceDel()
+	}
+
+	test := func(r interface{}) error {
+		return errors.New("Reuse Error")
+	}
+
+	p, err := NewPool(min, max, create, destroy, test)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := p.Get()
+	if err != nil {
+		t.Fatal("Expected No Error")
+	}
+
+	r.Close()
+	reuse, err := p.Get()
+
+	casted1 := r.Resource.(*resource_symulator)
+	casted2 := reuse.Resource.(*resource_symulator)
+
+	if casted1.id == casted2.id {
+		t.Fatal("Expected resources not to be reused")
+	}
+
+	if i != 2 {
+		t.Fatalf("Exepected two new resources to be made got %d", i)
+	}
+}
+
+
