@@ -1,11 +1,11 @@
 package pool
 
 import (
+	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-	"sync/atomic"
-	"sync"
-	"errors"
 )
 
 var (
@@ -37,9 +37,9 @@ func TestIntialize(t *testing.T) {
 		return resourceNew()
 	}
 
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 
 	test := func(r interface{}) error {
@@ -67,9 +67,9 @@ func TestBeyond(t *testing.T) {
 	create := func() (interface{}, error) {
 		return resourceNew()
 	}
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 
 	test := func(r interface{}) error {
@@ -97,6 +97,7 @@ func TestBeyond(t *testing.T) {
 	}
 }
 
+//Test that we don't deadlock
 func TestWait(t *testing.T) {
 
 	var err error
@@ -105,9 +106,9 @@ func TestWait(t *testing.T) {
 		return resourceNew()
 	}
 
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 
 	test := func(r interface{}) error {
@@ -125,11 +126,17 @@ func TestWait(t *testing.T) {
 	_, err = p.Get()
 	msg, err := p.Get()
 
+	called := false
 	go func() {
 		msg.Close()
-	}();
+		called = true
+	}()
 
+	//this waits till msg.Close() is called in the go thread
 	msg, err = p.Get()
+	if !called {
+		t.Fatal("Expected close of resource to block execution")
+	}
 
 }
 
@@ -139,9 +146,9 @@ func TestExcluse(t *testing.T) {
 		return resourceNew()
 	}
 
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 
 	test := func(r interface{}) error {
@@ -188,14 +195,17 @@ func TestExcluse(t *testing.T) {
 func TestResourceRelease(t *testing.T) {
 
 	var err error
+	var destroys uint32
 
 	create := func() (interface{}, error) {
 		return resourceNew()
 	}
 
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
+
+		destroys++
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 
 	test := func(r interface{}) error {
@@ -207,20 +217,16 @@ func TestResourceRelease(t *testing.T) {
 	max = 50
 	p, err := NewPool(min, max, create, destroy, test)
 
-	if p.Cap() != max {
-		t.Fatalf("Cap size incorrect. Should be %d but is %d", max, cap(p.resources))
-	}
-
 	msg, err := p.Get()
 	if err != nil {
 		t.Fatalf("get error %d", err)
 	}
 
-	if p.AvailableNow() != min - 1 {
-		t.Fatalf("AvailableNow size incorrect. Should be %d but is %d", min - 1, len(p.resources))
+	if p.AvailableNow() != min-1 {
+		t.Fatalf("AvailableNow size incorrect. Should be %d but is %d", min-1, len(p.resources))
 	}
 
-	p.Release(msg)
+	msg.Close()
 	if min != p.AvailableNow() {
 		t.Fatalf("AvailableNow size incorrect. Should be %d but is %d", min, p.AvailableNow())
 	}
@@ -234,11 +240,11 @@ func TestResourceRelease(t *testing.T) {
 	}
 
 	for _, v := range dbuse {
-		p.Destroy(v)
+		v.Destroy()
 	}
 
-	if p.Cap() != max {
-		t.Fatalf("Pool cap incorrect. Should be %d but is %d", max, p.Cap())
+	if destroys != max {
+		t.Fatalf("Expected %d destroys got %d", max, destroys)
 	}
 
 	// pools test
@@ -269,18 +275,18 @@ func TestResourceRelease(t *testing.T) {
 	}
 
 	for i := uint32(0); i < po; i++ {
-		p.Release(dbuse[i])
+		value := dbuse[i]
+		value.Close()
 	}
 
 	if p.InUse() != 0 {
 		t.Fatalf("Pool InUse() incorrect. Should be 0 but is %d", p.InUse())
 	}
-	if p.Cap() != max {
-		t.Fatalf("Pool Cap() incorrect. Should be %d but is %d", max, p.Cap())
-	}
+
 	if p.AvailableNow() < min || p.AvailableNow() > max {
 		t.Fatalf("Pool AvailableNow() incorrect. Should be min %d, max %d but is %d", min, max, p.AvailableNow())
 	}
+
 	if p.AvailableMax() != p.Cap() {
 		t.Fatalf("Pool AvailableMax() incorrect. Should be  %d but is %d", max, p.AvailableMax())
 	}
@@ -296,10 +302,10 @@ func TestClose(t *testing.T) {
 	create := func() (interface{}, error) {
 		return resourceNew()
 	}
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
 		i++
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 	test := func(r interface{}) error {
 		return nil
@@ -313,7 +319,77 @@ func TestClose(t *testing.T) {
 	}
 }
 
-func TestError(t *testing.T) {
+func TestPoolClose(t *testing.T) {
+
+	var min, max uint32
+	min = 10
+	max = 50
+
+	create := func() (interface{}, error) {
+		return resourceNew()
+	}
+	destroy := func(r interface{}) {
+		db := r.(*resource_symulator)
+		db.resourceDel()
+	}
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, _ := NewPool(min, max, create, destroy, test)
+	p.Close()
+	_, err := p.Get()
+	if err != PoolClosedError {
+		t.Fatal("Expected Pool Closed Error got", err)
+	}
+}
+
+func TestAddingABumResource(t *testing.T) {
+
+	var min, max uint32
+	min = 10
+	max = 50
+	i := 0
+
+	create := func() (interface{}, error) {
+
+		i++
+		if i%2 == 0 {
+			return nil, errors.New("Create Error")
+		}
+
+		return resourceNew()
+	}
+
+	destroy := func(r interface{}) {
+		db := r.(*resource_symulator)
+		db.resourceDel()
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, _ := NewPool(min, max, create, destroy, test)
+	for index := 0; index < 50; index++ {
+		func() {
+			r, err := p.Get()
+			if err == nil {
+				defer r.Close()
+			}
+		}()
+	}
+
+	if p.InUse() != 0 {
+		t.Fatal("Expected 0 in use")
+	}
+
+	if p.AvailableNow() >= min {
+		t.Fatal("Expected availableNow to be lower than min because of errors")
+	}
+}
+
+func TestCreateError(t *testing.T) {
 
 	var min, max uint32
 	min = 10
@@ -321,18 +397,13 @@ func TestError(t *testing.T) {
 	var i int = 0
 
 	create := func() (interface{}, error) {
-
-		if i % 2 == 2 {
-			return resourceNew()
-		}
-
 		i++
 		return nil, errors.New("Some error")
 	}
 
-	destroy := func(r interface{}) error {
+	destroy := func(r interface{}) {
 		db := r.(*resource_symulator)
-		return db.resourceDel()
+		db.resourceDel()
 	}
 
 	test := func(r interface{}) error {
@@ -344,39 +415,67 @@ func TestError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = p.Get()
+	r, err := p.Get()
 	if err == nil {
 		t.Fatal("Expected Error")
 	}
 
-	for index := 0; uint32(index) < max; index++ {
-		r, err := p.Get()
-		if err == nil {
-			go r.Close()
-		}
+	r, err = p.Get()
+
+	//shouldn't do anything
+	r.Close()
+	r.Destroy()
+
+	if p.InUse() != 0 {
+		t.Fail()
+	}
+
+	if p.AvailableMax() != max {
+		t.Fail()
+	}
+
+	//throw away
+	p.Get()
+	p.Get()
+
+	stats := p.Stats()
+	if stats.InUse != 0 {
+		t.Fail()
+	}
+
+	if stats.AvailableNow != 0 {
+		t.Fail()
+	}
+
+	if stats.AvailableMax != max {
+		t.Fail()
+	}
+
+	if stats.ResourcesOpen != 0 {
+		t.Fail()
 	}
 
 }
 
-
 func TestTest(t *testing.T) {
 
 	var min, max uint32
-	min = 0
+	min = 10
 	max = 50
-	var i int = 0
+	var i uint32 = 0
+	var tested uint32 = 0
 
 	create := func() (interface{}, error) {
 		i++
 		return resourceNew()
 	}
 
-	destroy := func(r interface{}) error {
-		db := r.(*resource_symulator)
-		return db.resourceDel()
+	destroy := func(r interface{}) {
+
 	}
 
 	test := func(r interface{}) error {
+		tested++
 		return errors.New("Reuse Error")
 	}
 
@@ -396,13 +495,16 @@ func TestTest(t *testing.T) {
 	casted1 := r.Resource.(*resource_symulator)
 	casted2 := reuse.Resource.(*resource_symulator)
 
+	if tested != 2 {
+		t.Fatal("Exepected one test got ", tested)
+	}
+
 	if casted1.id == casted2.id {
 		t.Fatal("Expected resources not to be reused")
 	}
 
-	if i != 2 {
+	//every test fails plus the 10 we initialized the pool with
+	if i != min+uint32(2) {
 		t.Fatalf("Exepected two new resources to be made got %d", i)
 	}
 }
-
-
