@@ -46,10 +46,7 @@ func TestIntialize(t *testing.T) {
 		return nil
 	}
 
-	p, err := NewPool(2, 5, create, destroy, test)
-	if err != nil {
-		t.Fatalf("Resource error: %s", err.Error())
-	}
+	p, _ := NewPool(2, 5, create, destroy, test)
 
 	msg, err := p.Get()
 	if err != nil {
@@ -76,7 +73,7 @@ func TestBeyond(t *testing.T) {
 		return nil
 	}
 
-	p, err := NewPool(2, 5, create, destroy, test)
+	p, _ := NewPool(2, 5, create, destroy, test)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -115,7 +112,7 @@ func TestWait(t *testing.T) {
 		return nil
 	}
 
-	p, err := NewPool(2, 5, create, destroy, test)
+	p, _ := NewPool(2, 5, create, destroy, test)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -160,10 +157,7 @@ func TestExcluse(t *testing.T) {
 	max = 50
 
 	no = 0
-	p, err := NewPool(min, max, create, destroy, test)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p, _ := NewPool(min, max, create, destroy, test)
 
 	var waitgroup sync.WaitGroup
 	check := make(map[int32]bool)
@@ -192,6 +186,8 @@ func TestExcluse(t *testing.T) {
 	p.Close()
 }
 
+
+
 func TestResourceRelease(t *testing.T) {
 
 	var err error
@@ -215,7 +211,9 @@ func TestResourceRelease(t *testing.T) {
 	var min, max uint32
 	min = 10
 	max = 50
-	p, err := NewPool(min, max, create, destroy, test)
+	p, fillChan := NewPool(min, max, create, destroy, test)
+
+	<-fillChan //wait for the pool to fill
 
 	msg, err := p.Get()
 	if err != nil {
@@ -410,17 +408,10 @@ func TestCreateError(t *testing.T) {
 		return nil
 	}
 
-	p, err := NewPool(min, max, create, destroy, test)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p, _ := NewPool(min, max, create, destroy, test)
 
-	r, err := p.Get()
-	if err == nil {
-		t.Fatal("Expected Error")
-	}
-
-	r, err = p.Get()
+	r, _ := p.Get()
+	r, _ = p.Get()
 
 	//shouldn't do anything
 	r.Close()
@@ -479,10 +470,8 @@ func TestTest(t *testing.T) {
 		return errors.New("Reuse Error")
 	}
 
-	p, err := NewPool(min, max, create, destroy, test)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p, fillChannel := NewPool(min, max, create, destroy, test)
+	<-fillChannel
 
 	r, err := p.Get()
 	if err != nil {
