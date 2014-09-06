@@ -13,7 +13,6 @@ var PoolClosedError = errors.New("Pool is closed")
 
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
-
 	mx     sync.RWMutex
 	min    uint32 // Minimum Available resources
 	inUse  uint32
@@ -76,7 +75,6 @@ func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(inter
 
 	return p, error
 }
-
 
 func (p *ResourcePool) FillToMin() (err error) {
 
@@ -148,13 +146,13 @@ func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
 			wrapper.Resource, err = p.resOpen()
 		}
 
-	//nothing current available. Lets push a new resource onto the pool
-	//if our cap > total outstanding
+		//nothing current available. Lets push a new resource onto the pool
+		//if our cap > total outstanding
 	} else if p.iAvailableMax() > 0 {
 
 		wrapper.Resource, err = p.resOpen()
 
-	//We have exhausted our resources
+		//We have exhausted our resources
 	} else {
 
 		return wrapper, ResourceExhaustedError
@@ -186,6 +184,14 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 
 	p.mx.Lock()
 	defer p.mx.Unlock()
+
+	//if this pool is closed when trying to release this resource
+	//just close resource
+	if p.closed == true {
+		p.resClose(wrapper.Resource)
+		wrapper.p = nil
+		return
+	}
 
 	//remove resource from pool
 	if p.iAvailableNow() >= p.min {

@@ -1,0 +1,7 @@
+.idea/*
+snapshot
+*.iml
+pubnubMessaging.log
+.DS_Store
+*.swp
+.agignore
