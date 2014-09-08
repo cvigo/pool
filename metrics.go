@@ -2,7 +2,7 @@ package pool
 
 import "time"
 
-type PoolMetrtics interface {
+type PoolMetrics interface {
 	ReportResources(stats ResourcePoolStat)
 	ReportWait(wt time.Duration)
 }

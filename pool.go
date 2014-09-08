@@ -8,12 +8,17 @@ import (
 	"time"
 )
 
+//callbacks
+type resourceOpen func() (interface{}, error)
+type resourceClose func(interface{})
+type resourceTest func(interface{}) error
+
 var ResourceExhaustedError = errors.New("No Resources Available")
 var PoolClosedError = errors.New("Pool is closed")
 
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
-	Metrics PoolMetrtics
+	Metrics PoolMetrics
 
 	mx     sync.RWMutex
 	min    uint32 // Minimum Available resources
@@ -57,7 +62,14 @@ func (rw ResourceWrapper) Destroy() {
  * Creates a new resource Pool
  * Caller can decide to wait on the pool to fill
  */
-func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(interface{}), t func(interface{}) error) (*ResourcePool, chan error) {
+func NewPool(
+	min uint32,
+	max uint32,
+	o resourceOpen,
+	c resourceClose,
+	t resourceTest,
+	metrics PoolMetrics,
+) (*ResourcePool, chan error) {
 
 	p := new(ResourcePool)
 	p.min = min
@@ -67,6 +79,7 @@ func NewPool(min uint32, max uint32, o func() (interface{}, error), c func(inter
 	p.resClose = c
 	p.resTest = t
 	p.retryTime = time.Millisecond
+	p.Metrics = metrics
 
 	//fill the pool to the min
 	error := make(chan error, 1)
@@ -102,6 +115,7 @@ func (p *ResourcePool) Fill() {
 		}
 
 		//if we should keep on filling, do the next one on the next loop
+		//ie don't hog the lock
 		if p.iShouldFill() {
 			go p.Fill()
 		}

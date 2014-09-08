@@ -46,7 +46,7 @@ func TestIntialize(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(2, 5, create, destroy, test)
+	p, _ := NewPool(2, 5, create, destroy, test, nil)
 
 	msg, err := p.Get()
 	if err != nil {
@@ -73,7 +73,7 @@ func TestBeyond(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(2, 5, create, destroy, test)
+	p, _ := NewPool(2, 5, create, destroy, test, nil)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -112,7 +112,7 @@ func TestWait(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(2, 5, create, destroy, test)
+	p, _ := NewPool(2, 5, create, destroy, test, nil)
 	if err != nil {
 		t.Fatalf("Resource error: %s", err.Error())
 	}
@@ -157,7 +157,7 @@ func TestExcluse(t *testing.T) {
 	max = 50
 
 	no = 0
-	p, _ := NewPool(min, max, create, destroy, test)
+	p, _ := NewPool(min, max, create, destroy, test, nil)
 
 	var waitgroup sync.WaitGroup
 	check := make(map[int32]bool)
@@ -186,8 +186,6 @@ func TestExcluse(t *testing.T) {
 	p.Close()
 }
 
-
-
 func TestResourceRelease(t *testing.T) {
 
 	var err error
@@ -211,7 +209,7 @@ func TestResourceRelease(t *testing.T) {
 	var min, max uint32
 	min = 10
 	max = 50
-	p, fillChan := NewPool(min, max, create, destroy, test)
+	p, fillChan := NewPool(min, max, create, destroy, test, nil)
 
 	<-fillChan //wait for the pool to fill
 
@@ -309,7 +307,7 @@ func TestClose(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test)
+	p, _ := NewPool(min, max, create, destroy, test, nil)
 	count := int(p.ResourcesOpen())
 	p.Close()
 	if i != count {
@@ -334,7 +332,7 @@ func TestPoolClose(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test)
+	p, _ := NewPool(min, max, create, destroy, test, nil)
 	p.Close()
 	_, err := p.Get()
 	if err != PoolClosedError {
@@ -368,7 +366,7 @@ func TestAddingABumResource(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test)
+	p, _ := NewPool(min, max, create, destroy, test, nil)
 	for index := 0; index < 50; index++ {
 		func() {
 			r, err := p.Get()
@@ -408,7 +406,7 @@ func TestCreateError(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test)
+	p, _ := NewPool(min, max, create, destroy, test, nil)
 
 	r, _ := p.Get()
 	r, _ = p.Get()
@@ -470,7 +468,7 @@ func TestTest(t *testing.T) {
 		return errors.New("Reuse Error")
 	}
 
-	p, fillChannel := NewPool(min, max, create, destroy, test)
+	p, fillChannel := NewPool(min, max, create, destroy, test, nil)
 	<-fillChannel
 
 	r, err := p.Get()
