@@ -74,18 +74,35 @@ func TestBeyond(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(2, 5, create, destroy, test, nil)
+	p, f := NewPool(2, 5, create, destroy, test, nil)
+	if <-f != nil {
+		t.Fatal("Expected no error")
+	}
+
 	defer p.Close()
 
-	_, err = p.getAvailable()
-	_, err = p.getAvailable()
-	_, err = p.getAvailable()
-	_, err = p.getAvailable()
-	_, err = p.getAvailable()
-	_, err = p.getAvailable()
+	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
 
-	if err == nil {
-		t.Fatalf("Must error on sixth get")
+	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = p.getAvailable(time.After(time.Microsecond)); err == nil {
+		t.Fatal("expected error on sixth get")
 	}
 
 	if err != ResourceExhaustedError {

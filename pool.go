@@ -165,18 +165,13 @@ func (p *ResourcePool) Get() (resource ResourceWrapper, err error) {
 func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 
 	start := time.Now()
+	timeout := time.After(p.TimeoutTime)
 
 	for {
-		r, e := p.getAvailable()
-		if e == ResourceExhaustedError || e == ResourceTestError {
+		r, e := p.getAvailable(timeout)
 
-			//wait timeout
-			if time.Now().Sub(start) > p.TimeoutTime {
-				return r, e
-			}
-
-			time.Sleep(p.RetryTime)
-			p.Report()
+		//if the test failed try again
+		if e == ResourceTestError {
 			continue
 		}
 
@@ -188,38 +183,42 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 }
 
 // Fetch / create a new resource if available
-func (p *ResourcePool) getAvailable() (ResourceWrapper, error) {
+func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, error) {
 
+	//Wait for an object, or a timeout
 	select {
 	case wrapper, ok := <-p.resources:
 
 		//pool is closed
 		if !ok {
-			return wrapper, PoolClosedError
+			return ResourceWrapper{p: p, e: PoolClosedError}, PoolClosedError
 		}
 
 		//if the resource fails the test, close it and wait to get another resource
 		if p.resTest(wrapper.Resource) != nil {
 			p.resClose(wrapper.Resource)
 			wrapper.Close()
-			//the close signals a fill
+			go p.Fill()
 			return ResourceWrapper{p: p, e: ResourceTestError}, ResourceTestError
 		}
 
+		//we got a valid resource to return
 		//signal the filler that we need to fill
 		go p.Fill()
 		return wrapper, wrapper.e
-	default:
-	}
 
-	//we have nothing sitting around. So we either need to wait for a new one or bail
-	return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
+	case <-timeout:
+		return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
+	}
 }
 
 /*
  * Returns a resource back in to the Pool
  */
 func (p *ResourcePool) release(wrapper *ResourceWrapper) {
+
+	p.fMutex.Lock()
+	defer p.fMutex.Unlock()
 
 	//if this pool is closed when trying to release this resource
 	//just close resource
@@ -232,9 +231,6 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 	//remove resource from pool
 	if p.iAvailableNow() >= p.min {
 
-		p.fMutex.Lock()
-		defer p.fMutex.Unlock()
-
 		p.resClose(wrapper.Resource)
 		p.open--
 		wrapper.p = nil
@@ -244,8 +240,6 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 		//put it back in the available resources queue
 		p.resources <- *wrapper
 	}
-
-	go p.Fill()
 }
 
 /*
