@@ -33,7 +33,6 @@ type ResourcePool struct {
 	resOpen   func() (interface{}, error)
 	resClose  func(interface{}) //we can't do anything with a close error
 	resTest   func(interface{}) error
-	fillWait  chan bool
 }
 
 type ResourceWrapper struct {
@@ -85,14 +84,12 @@ func NewPool(
 	p.RetryTime = time.Microsecond
 	p.TimeoutTime = time.Second
 	p.Metrics = metrics
-	p.fillWait = make(chan bool, max)
 
 	//fill the pool to the min
 	errChannel := make(chan error, 1)
 	go func() {
 		defer close(errChannel)
 		errChannel <- p.FillToMin()
-		go p.RunFill()
 	}()
 
 	return p, errChannel
@@ -100,41 +97,6 @@ func NewPool(
 
 func (p *ResourcePool) iShouldFill() bool {
 	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
-}
-
-//fills the pool till we hit our min allocated pool size, but doesn't hog the lock
-func (p *ResourcePool) RunFill() {
-
-	errorCount := 0
-
-	for {
-
-		e, shouldFill := p.Fill()
-
-		//if the pool is closed return
-		if e != nil {
-
-			if e == PoolClosedError {
-				return
-			}
-
-			errorCount++
-
-		} else {
-
-			errorCount = 0
-		}
-
-		if !shouldFill {
-
-			//pool closed while we are waiting
-			if _, ok := <-p.fillWait; ok == false {
-				return
-			}
-		}
-
-		time.Sleep(time.Microsecond + (time.Microsecond * time.Duration(errorCount) * time.Duration(errorCount)))
-	}
 }
 
 func (p *ResourcePool) Fill() (error, bool) {
@@ -244,10 +206,7 @@ func (p *ResourcePool) getAvailable() (ResourceWrapper, error) {
 		}
 
 		//signal the filler that we need to fill
-		go func() {
-			p.fillWait <- true
-		}()
-
+		go p.Fill()
 		return wrapper, wrapper.e
 	default:
 	}
@@ -284,6 +243,8 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 		//put it back in the available resources queue
 		p.resources <- *wrapper
 	}
+
+	go p.Fill()
 }
 
 /*
@@ -298,6 +259,8 @@ func (p *ResourcePool) destroy(wrapper *ResourceWrapper) {
 	p.resClose(wrapper.Resource)
 	p.open--
 	wrapper.p = nil
+
+	go p.Fill()
 }
 
 // Remove all resources from the Pool.
@@ -308,7 +271,6 @@ func (p *ResourcePool) Close() {
 	defer p.fMutex.Unlock()
 
 	p.closed = true
-	close(p.fillWait)
 
 	for {
 		select {
