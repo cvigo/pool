@@ -126,6 +126,7 @@ func (p *ResourcePool) RunFill() {
 		}
 
 		if !shouldFill {
+
 			//pool closed while we are waiting
 			if _, ok := <-p.fillWait; ok == false {
 				return
@@ -213,9 +214,11 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 			}
 
 			time.Sleep(p.RetryTime)
+			p.Report()
 			continue
 		}
 
+		p.Report()
 		p.ReportWait(time.Now().Sub(start))
 		return r, e
 	}
@@ -240,7 +243,11 @@ func (p *ResourcePool) getAvailable() (ResourceWrapper, error) {
 			return ResourceWrapper{p: p, e: ResourceTestError}, ResourceTestError
 		}
 
-		p.fillWait <- true
+		//signal the filler that we need to fill
+		go func() {
+			p.fillWait <- true
+		}()
+
 		return wrapper, wrapper.e
 	default:
 	}
@@ -277,9 +284,6 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 		//put it back in the available resources queue
 		p.resources <- *wrapper
 	}
-
-	//decriment how many outstanding resources we have
-	p.Report()
 }
 
 /*
@@ -294,7 +298,6 @@ func (p *ResourcePool) destroy(wrapper *ResourceWrapper) {
 	p.resClose(wrapper.Resource)
 	p.open--
 	wrapper.p = nil
-	p.Report()
 }
 
 // Remove all resources from the Pool.
@@ -325,13 +328,13 @@ Metrics
 
 func (p *ResourcePool) Report() {
 	if p.Metrics != nil {
-		p.Metrics.ReportResources(p.iStats())
+		go p.Metrics.ReportResources(p.iStats())
 	}
 }
 
 func (p *ResourcePool) ReportWait(d time.Duration) {
 	if p.Metrics != nil {
-		p.Metrics.ReportWait(d)
+		go p.Metrics.ReportWait(d)
 	}
 }
 
