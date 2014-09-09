@@ -202,6 +202,7 @@ func (p *ResourcePool) getAvailable() (ResourceWrapper, error) {
 		if p.resTest(wrapper.Resource) != nil {
 			p.resClose(wrapper.Resource)
 			wrapper.Close()
+			//the close signals a fill
 			return ResourceWrapper{p: p, e: ResourceTestError}, ResourceTestError
 		}
 
