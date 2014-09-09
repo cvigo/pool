@@ -47,6 +47,7 @@ func TestIntialize(t *testing.T) {
 	}
 
 	p, _ := NewPool(2, 5, create, destroy, test, nil)
+	defer p.Close()
 
 	msg, err := p.Get()
 	if err != nil {
@@ -74,9 +75,7 @@ func TestBeyond(t *testing.T) {
 	}
 
 	p, _ := NewPool(2, 5, create, destroy, test, nil)
-	if err != nil {
-		t.Fatalf("Resource error: %s", err.Error())
-	}
+	defer p.Close()
 
 	_, err = p.getAvailable()
 	_, err = p.getAvailable()
@@ -113,9 +112,7 @@ func TestWait(t *testing.T) {
 	}
 
 	p, _ := NewPool(2, 5, create, destroy, test, nil)
-	if err != nil {
-		t.Fatalf("Resource error: %s", err.Error())
-	}
+	defer p.Close()
 
 	_, err = p.Get()
 	_, err = p.Get()
@@ -131,6 +128,10 @@ func TestWait(t *testing.T) {
 
 	//this waits till msg.Close() is called in the go thread
 	msg, err = p.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	if !called {
 		t.Fatal("Expected close of resource to block execution")
 	}
@@ -158,6 +159,7 @@ func TestExcluse(t *testing.T) {
 
 	no = 0
 	p, _ := NewPool(min, max, create, destroy, test, nil)
+	defer p.Close()
 
 	var waitgroup sync.WaitGroup
 	check := make(map[int32]bool)
@@ -168,7 +170,10 @@ func TestExcluse(t *testing.T) {
 		go func(index int32) {
 
 			defer waitgroup.Done()
-			obj, _ := p.Get()
+			obj, err := p.Get()
+			if err != nil {
+				t.Fatalf("Expected no error, got %s", err)
+			}
 			casted := obj.Resource.(*resource_symulator)
 			check[casted.id] = true
 
@@ -182,8 +187,6 @@ func TestExcluse(t *testing.T) {
 			t.Fatalf("Resource %d unused", i)
 		}
 	}
-
-	p.Close()
 }
 
 func TestResourceRelease(t *testing.T) {
@@ -210,7 +213,7 @@ func TestResourceRelease(t *testing.T) {
 	min = 10
 	max = 50
 	p, fillChan := NewPool(min, max, create, destroy, test, nil)
-
+	defer p.Close()
 	<-fillChan //wait for the pool to fill
 
 	msg, err := p.Get()
@@ -231,7 +234,7 @@ func TestResourceRelease(t *testing.T) {
 	for i := uint32(0); i < max; i++ {
 		dbuse[i], err = p.Get()
 		if err != nil {
-			t.Fatalf("get error %d", err)
+			t.Fatalf("get error %d, %d", i, err)
 		}
 	}
 
@@ -262,14 +265,6 @@ func TestResourceRelease(t *testing.T) {
 		t.Fatalf("Pool InUse() before release incorrect. Should be 0 but is %d", p.InUse())
 	}
 
-	if p.AvailableMax() != p.Cap()-po {
-		t.Fatalf("Pool AvailableMax() incorrect. Should be  %d but is %d", max-po, p.AvailableMax())
-	}
-
-	if stat.AvailableMax != p.Cap()-po {
-		t.Fatalf("Pool AvailableMax() incorrect. Should be  %d but is %d", max-po, p.AvailableMax())
-	}
-
 	for i := uint32(0); i < po; i++ {
 		value := dbuse[i]
 		value.Close()
@@ -283,9 +278,6 @@ func TestResourceRelease(t *testing.T) {
 		t.Fatalf("Pool AvailableNow() incorrect. Should be min %d, max %d but is %d", min, max, p.AvailableNow())
 	}
 
-	if p.AvailableMax() != p.Cap() {
-		t.Fatalf("Pool AvailableMax() incorrect. Should be  %d but is %d", max, p.AvailableMax())
-	}
 }
 
 func TestClose(t *testing.T) {
@@ -308,6 +300,7 @@ func TestClose(t *testing.T) {
 	}
 
 	p, _ := NewPool(min, max, create, destroy, test, nil)
+
 	count := int(p.ResourcesOpen())
 	p.Close()
 	if i != count {
@@ -367,6 +360,8 @@ func TestAddingABumResource(t *testing.T) {
 	}
 
 	p, _ := NewPool(min, max, create, destroy, test, nil)
+	defer p.Close()
+
 	for index := 0; index < 50; index++ {
 		func() {
 			r, err := p.Get()
@@ -407,6 +402,8 @@ func TestCreateError(t *testing.T) {
 	}
 
 	p, _ := NewPool(min, max, create, destroy, test, nil)
+	p.TimeoutTime = time.Microsecond
+	defer p.Close()
 
 	r, _ := p.Get()
 	r, _ = p.Get()
@@ -416,10 +413,6 @@ func TestCreateError(t *testing.T) {
 	r.Destroy()
 
 	if p.InUse() != 0 {
-		t.Fail()
-	}
-
-	if p.AvailableMax() != max {
 		t.Fail()
 	}
 
@@ -433,10 +426,6 @@ func TestCreateError(t *testing.T) {
 	}
 
 	if stats.AvailableNow != 0 {
-		t.Fail()
-	}
-
-	if stats.AvailableMax != max {
 		t.Fail()
 	}
 
@@ -469,29 +458,24 @@ func TestTest(t *testing.T) {
 	}
 
 	p, fillChannel := NewPool(min, max, create, destroy, test, nil)
+	p.TimeoutTime = time.Microsecond
+	defer p.Close()
 	<-fillChannel
 
-	r, err := p.Get()
-	if err != nil {
-		t.Fatal("Expected No Error")
+	if i != min {
+		t.Fatalf("Exepected %d new rources to be made, got %d", min, i)
 	}
 
+	//bum close
+	r, e := p.Get()
 	r.Close()
-	reuse, err := p.Get()
 
-	casted1 := r.Resource.(*resource_symulator)
-	casted2 := reuse.Resource.(*resource_symulator)
-
-	if tested != 2 {
-		t.Fatal("Exepected one test got ", tested)
+	if e == nil {
+		t.Fatal("expected error")
 	}
 
-	if casted1.id == casted2.id {
-		t.Fatal("Expected resources not to be reused")
-	}
-
-	//every test fails plus the 10 we initialized the pool with
-	if i != min+uint32(2) {
-		t.Fatalf("Exepected two new resources to be made got %d", i)
+	_, e = p.Get()
+	if e == nil {
+		t.Fatal("expected error")
 	}
 }

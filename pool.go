@@ -14,22 +14,26 @@ type resourceClose func(interface{})
 type resourceTest func(interface{}) error
 
 var ResourceExhaustedError = errors.New("No Resources Available")
+var ResourceTestError = errors.New("Resource Failed Reuse Test")
 var PoolClosedError = errors.New("Pool is closed")
 
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
-	Metrics PoolMetrics
+	Metrics     PoolMetrics
+	RetryTime   time.Duration
+	TimeoutTime time.Duration
 
-	mx     sync.RWMutex
+	fMutex sync.RWMutex //protects number of open resources
+	open   uint32
+
 	min    uint32 // Minimum Available resources
-	inUse  uint32
 	closed bool
 
-	retryTime time.Duration
 	resources chan ResourceWrapper
 	resOpen   func() (interface{}, error)
 	resClose  func(interface{}) //we can't do anything with a close error
 	resTest   func(interface{}) error
+	fillWait  chan bool
 }
 
 type ResourceWrapper struct {
@@ -78,55 +82,98 @@ func NewPool(
 	p.resOpen = o
 	p.resClose = c
 	p.resTest = t
-	p.retryTime = time.Millisecond
+	p.RetryTime = time.Microsecond
+	p.TimeoutTime = time.Second
 	p.Metrics = metrics
+	p.fillWait = make(chan bool, max)
 
 	//fill the pool to the min
-	error := make(chan error, 1)
+	errChannel := make(chan error, 1)
 	go func() {
-		defer close(error)
-		error <- p.FillToMin()
+		defer close(errChannel)
+		errChannel <- p.FillToMin()
+		go p.RunFill()
 	}()
 
-	return p, error
+	return p, errChannel
 }
 
 func (p *ResourcePool) iShouldFill() bool {
-	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen() && !p.closed
+	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
 }
 
 //fills the pool till we hit our min allocated pool size, but doesn't hog the lock
-func (p *ResourcePool) Fill() {
+func (p *ResourcePool) RunFill() {
 
-	p.mx.Lock()
-	defer p.mx.Unlock()
+	errorCount := 0
+
+	for {
+
+		e, shouldFill := p.Fill()
+
+		//if the pool is closed return
+		if e != nil {
+
+			if e == PoolClosedError {
+				return
+			}
+
+			errorCount++
+
+		} else {
+
+			errorCount = 0
+		}
+
+		if !shouldFill {
+			//pool closed while we are waiting
+			if _, ok := <-p.fillWait; ok == false {
+				return
+			}
+		}
+
+		time.Sleep(time.Microsecond + (time.Microsecond * time.Duration(errorCount) * time.Duration(errorCount)))
+	}
+}
+
+func (p *ResourcePool) Fill() (error, bool) {
+
+	p.fMutex.Lock()
+	defer p.fMutex.Unlock()
+
+	if p.closed {
+		return PoolClosedError, false
+	}
 
 	// make sure we are not going over limit
-	//our max > total including outstanding
+	//our max > total open
 	if p.iShouldFill() {
 
 		resource, err := p.resOpen()
-		if err == nil {
-			wrapper := ResourceWrapper{p: p, Resource: resource}
-			p.resources <- wrapper
-		} else {
-			log.Print(err)
-			return
+
+		if err != nil {
+
+			//if we error, by definition we should still need to fill the pool
+			return err, true
 		}
 
-		//if we should keep on filling, do the next one on the next loop
-		//ie don't hog the lock
-		if p.iShouldFill() {
-			go p.Fill()
-		}
+		wrapper := ResourceWrapper{p: p, Resource: resource}
+		p.resources <- wrapper
+		p.open++
 	}
+
+	return nil, p.iShouldFill()
 }
 
 //used to fill the pool till we hit our min available pool size
 func (p *ResourcePool) FillToMin() (err error) {
 
-	p.mx.Lock()
-	defer p.mx.Unlock()
+	p.fMutex.Lock()
+	defer p.fMutex.Unlock()
+
+	if p.closed {
+		return PoolClosedError
+	}
 
 	// make sure we are not going over limit
 	//our max > total including outstanding
@@ -135,6 +182,7 @@ func (p *ResourcePool) FillToMin() (err error) {
 		if err == nil {
 			wrapper := ResourceWrapper{p: p, Resource: resource}
 			p.resources <- wrapper
+			p.open++
 		} else {
 			return err
 		}
@@ -156,11 +204,15 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 	start := time.Now()
 
 	for {
-
 		r, e := p.getAvailable()
+		if e == ResourceExhaustedError || e == ResourceTestError {
 
-		if e == ResourceExhaustedError {
-			time.Sleep(p.retryTime)
+			//wait timeout
+			if time.Now().Sub(start) > p.TimeoutTime {
+				return r, e
+			}
+
+			time.Sleep(p.RetryTime)
 			continue
 		}
 
@@ -171,69 +223,36 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 }
 
 // Fetch / create a new resource if available
-func (p *ResourcePool) getAvailable() (resource ResourceWrapper, err error) {
+func (p *ResourcePool) getAvailable() (ResourceWrapper, error) {
 
-	p.mx.Lock()
-	defer p.mx.Unlock()
+	select {
+	case wrapper, ok := <-p.resources:
 
-	wrapper := ResourceWrapper{p: p}
-
-	if p.closed == true {
-		return wrapper, PoolClosedError
-	}
-
-	///Lets get a resource if we have some sitting around
-	if p.iAvailableNow() > 0 {
-
-		//we know the channel is open
-		wrapper, _ = <-p.resources
-
-		//make sure the resource is still okay
-		//if not get a new resource
-		if p.resTest(wrapper.Resource) != nil {
-			p.resClose(wrapper.Resource)
-			wrapper.Resource, err = p.resOpen()
+		//pool is closed
+		if !ok {
+			return wrapper, PoolClosedError
 		}
 
-		//nothing current available. Lets push a new resource onto the pool
-		//if our cap > total outstanding
-	} else if p.iAvailableMax() > 0 {
+		//if the resource fails the test, close it and wait to get another resource
+		if p.resTest(wrapper.Resource) != nil {
+			p.resClose(wrapper.Resource)
+			wrapper.Close()
+			return ResourceWrapper{p: p, e: ResourceTestError}, ResourceTestError
+		}
 
-		wrapper.Resource, err = p.resOpen()
-
-		//We have exhausted our resources
-	} else {
-
-		return wrapper, ResourceExhaustedError
+		p.fillWait <- true
+		return wrapper, wrapper.e
+	default:
 	}
 
-	//if we couldn't get a good resource lets return the error
-	if err != nil {
-
-		//just in case
-		wrapper.Resource = nil
-		wrapper.e = err
-		return wrapper, err
-	}
-
-	p.inUse++
-	p.Report()
-
-	//pre fill the pool if we are bellow our min and havn't hit our max
-	if p.iShouldFill() {
-		go p.Fill()
-	}
-
-	return wrapper, err
+	//we have nothing sitting around. So we either need to wait for a new one or bail
+	return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
 }
 
 /*
  * Returns a resource back in to the Pool
  */
 func (p *ResourcePool) release(wrapper *ResourceWrapper) {
-
-	p.mx.Lock()
-	defer p.mx.Unlock()
 
 	//if this pool is closed when trying to release this resource
 	//just close resource
@@ -246,7 +265,11 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 	//remove resource from pool
 	if p.iAvailableNow() >= p.min {
 
+		p.fMutex.Lock()
+		defer p.fMutex.Unlock()
+
 		p.resClose(wrapper.Resource)
+		p.open--
 		wrapper.p = nil
 
 	} else {
@@ -256,7 +279,6 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 	}
 
 	//decriment how many outstanding resources we have
-	p.inUse--
 	p.Report()
 }
 
@@ -266,12 +288,11 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
  */
 func (p *ResourcePool) destroy(wrapper *ResourceWrapper) {
 
-	p.mx.Lock()
-	defer p.mx.Unlock()
+	p.fMutex.Lock()
+	defer p.fMutex.Unlock()
 
 	p.resClose(wrapper.Resource)
-	p.inUse--
-
+	p.open--
 	wrapper.p = nil
 	p.Report()
 }
@@ -280,10 +301,11 @@ func (p *ResourcePool) destroy(wrapper *ResourceWrapper) {
 // Then close the pool.
 func (p *ResourcePool) Close() {
 
-	p.mx.Lock()
-	defer p.mx.Unlock()
+	p.fMutex.Lock()
+	defer p.fMutex.Unlock()
 
 	p.closed = true
+	close(p.fillWait)
 
 	for {
 		select {
@@ -320,24 +342,20 @@ func (p *ResourcePool) iAvailableNow() uint32 {
 	return uint32(len(p.resources)) //p.available
 }
 
-func (p *ResourcePool) iAvailableMax() uint32 {
-	return p.iCap() - p.iInUse()
-}
-
 func (p *ResourcePool) iResourcesOpen() uint32 {
-	return p.iInUse() + p.iAvailableNow()
-}
-
-func (p *ResourcePool) iInUse() uint32 {
-	return p.inUse
+	return p.open
 }
 
 func (p *ResourcePool) iCap() uint32 {
 	return uint32(cap(p.resources))
 }
 
+func (p *ResourcePool) iInUse() uint32 {
+	return p.open - p.iAvailableNow()
+}
+
 func (p *ResourcePool) iStats() ResourcePoolStat {
-	out := ResourcePoolStat{AvailableNow: p.iAvailableNow(), AvailableMax: p.iAvailableMax(), ResourcesOpen: p.iResourcesOpen(), InUse: p.iInUse(), Cap: p.iCap()}
+	out := ResourcePoolStat{AvailableNow: p.iAvailableNow(), ResourcesOpen: p.iResourcesOpen(), Cap: p.iCap(), InUse: p.iInUse()}
 	return out
 }
 
@@ -347,48 +365,32 @@ Synced Access
 // Resources already obtained and available for use
 func (p *ResourcePool) AvailableNow() uint32 {
 
-	p.mx.RLock()
-	defer p.mx.RUnlock()
-
 	out := uint32(len(p.resources))
 	return out
 }
 
-// Total # of resoureces including the ones we haven't yet created - whats in use
-func (p *ResourcePool) AvailableMax() uint32 {
+// number of open resources (should be less than Cap())
+func (p *ResourcePool) InUse() uint32 {
 
-	p.mx.RLock()
-	defer p.mx.RUnlock()
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
 
-	out := p.iCap() - p.iInUse()
+	out := p.iInUse()
 	return out
 }
 
 // number of open resources (should be less than Cap())
 func (p *ResourcePool) ResourcesOpen() uint32 {
 
-	p.mx.RLock()
-	defer p.mx.RUnlock()
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
 
-	out := p.iInUse() + p.iAvailableNow()
-	return out
-}
-
-// Resources being used right now
-func (p *ResourcePool) InUse() uint32 {
-
-	p.mx.RLock()
-	defer p.mx.RUnlock()
-
-	out := p.inUse
+	out := p.iResourcesOpen()
 	return out
 }
 
 // Max resources the pool allows; all in use, obtained, and not obtained.
 func (p *ResourcePool) Cap() uint32 {
-
-	p.mx.RLock()
-	defer p.mx.RUnlock()
 
 	out := uint32(cap(p.resources))
 	return out
@@ -396,15 +398,14 @@ func (p *ResourcePool) Cap() uint32 {
 
 type ResourcePoolStat struct {
 	AvailableNow  uint32
-	AvailableMax  uint32
 	ResourcesOpen uint32
-	InUse         uint32
 	Cap           uint32
+	InUse         uint32
 }
 
 func (p *ResourcePool) Stats() ResourcePoolStat {
 
-	p.mx.RLock()
-	defer p.mx.RUnlock()
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
 	return p.iStats()
 }
