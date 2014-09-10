@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,19 +21,25 @@ var PoolClosedError = errors.New("Pool is closed")
 // ResourcePool allows you to use a pool of resources.
 type ResourcePool struct {
 	Metrics     PoolMetrics
-	RetryTime   time.Duration
-	TimeoutTime time.Duration
+	TimeoutTime time.Duration //when aquiring a resource, how long should we wait before timining out
 
-	fMutex sync.RWMutex //protects number of open resources
-	open   uint32
+	fMutex  sync.RWMutex //protects the creation and removal of resources
+	open    uint32       //number of resources that are open (including in use by the client)
+	maxOpen uint32       //max number of open resources
+
+	//number of resources theoretically on the channel, this may differ from the actual length
+	//while the resources are actually being created and added
+	nAvailable uint32
 
 	min    uint32 // Minimum Available resources
 	closed bool
 
-	resources chan ResourceWrapper
-	resOpen   func() (interface{}, error)
-	resClose  func(interface{}) //we can't do anything with a close error
-	resTest   func(interface{}) error
+	resources chan ResourceWrapper //channel of available resources
+
+	//callbacks for opening, testing and closing a resource
+	resOpen  func() (interface{}, error)
+	resClose func(interface{}) //we can't do anything with a close error
+	resTest  func(interface{}) error
 }
 
 type ResourceWrapper struct {
@@ -78,10 +85,10 @@ func NewPool(
 	p.min = min
 
 	p.resources = make(chan ResourceWrapper, max)
+	p.maxOpen = max
 	p.resOpen = o
 	p.resClose = c
 	p.resTest = t
-	p.RetryTime = time.Microsecond
 	p.TimeoutTime = time.Second
 	p.Metrics = metrics
 
@@ -99,33 +106,79 @@ func (p *ResourcePool) iShouldFill() bool {
 	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
 }
 
-func (p *ResourcePool) Fill() (error, bool) {
+func (p *ResourcePool) FillLock() error {
 
 	p.fMutex.Lock()
 	defer p.fMutex.Unlock()
 
 	if p.closed {
-		return PoolClosedError, false
+		return PoolClosedError
 	}
 
 	// make sure we are not going over limit
-	//our max > total open
+	//our max > total including outstanding
 	if p.iShouldFill() {
-
 		resource, err := p.resOpen()
-
-		if err != nil {
-
-			//if we error, by definition we should still need to fill the pool
-			return err, true
+		if err == nil {
+			p.nAvailable++
+			wrapper := ResourceWrapper{p: p, Resource: resource}
+			p.resources <- wrapper
+			p.open++
+		} else {
+			return err
 		}
-
-		wrapper := ResourceWrapper{p: p, Resource: resource}
-		p.resources <- wrapper
-		p.open++
 	}
 
-	return nil, p.iShouldFill()
+	return nil
+}
+
+func (p *ResourcePool) Fill() error {
+	return p.FillAtomic()
+}
+
+func (p *ResourcePool) FillAtomic() error {
+
+	//fills should be able to run in parallel
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
+
+	//only things that write lock, close the pool therefor we can just read the value
+	if p.closed {
+		return PoolClosedError
+	}
+
+	//i don't undertsnd why these successive checks improve our benchmarking, but it does
+	if p.iAvailableNow() > p.min {
+		return nil
+	}
+
+	//optimistic changes
+	//We assume we need to add a resource, if in the process of aquiring the locks to do so
+	//we see we don't need to add a resource, we undo our lock
+	if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
+		atomic.AddUint32(&p.nAvailable, ^uint32(0))
+		return nil
+	}
+
+	//make sure we arn't going over our cap
+	if n_open := atomic.AddUint32(&p.open, 1); n_open > p.iCap() {
+		//decriment
+		atomic.AddUint32(&p.nAvailable, ^uint32(0))
+		atomic.AddUint32(&p.open, ^uint32(0))
+		return nil
+	}
+
+	resource, err := p.resOpen()
+	if err != nil {
+		//decriment
+		atomic.AddUint32(&p.nAvailable, ^uint32(0))
+		atomic.AddUint32(&p.open, ^uint32(0))
+		return err
+	}
+
+	wrapper := ResourceWrapper{p: p, Resource: resource}
+	p.resources <- wrapper
+	return nil
 }
 
 //used to fill the pool till we hit our min available pool size
@@ -143,6 +196,7 @@ func (p *ResourcePool) FillToMin() (err error) {
 	for p.iShouldFill() {
 		resource, err := p.resOpen()
 		if err == nil {
+			p.nAvailable++
 			wrapper := ResourceWrapper{p: p, Resource: resource}
 			p.resources <- wrapper
 			p.open++
@@ -194,6 +248,9 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
 			return ResourceWrapper{p: p, e: PoolClosedError}, PoolClosedError
 		}
 
+		//decriment the number of available resources
+		atomic.AddUint32(&p.nAvailable, ^uint32(0))
+
 		//if the resource fails the test, close it and wait to get another resource
 		if p.resTest(wrapper.Resource) != nil {
 			p.resClose(wrapper.Resource)
@@ -217,29 +274,34 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
  */
 func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 
-	p.fMutex.Lock()
-	defer p.fMutex.Unlock()
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
 
 	//if this pool is closed when trying to release this resource
-	//just close resource
+	//just close the resource
 	if p.closed == true {
 		p.resClose(wrapper.Resource)
+		atomic.AddUint32(&p.open, ^uint32(0))
 		wrapper.p = nil
 		return
 	}
 
-	//remove resource from pool
-	if p.iAvailableNow() >= p.min {
-
-		p.resClose(wrapper.Resource)
-		p.open--
-		wrapper.p = nil
-
-	} else {
-
-		//put it back in the available resources queue
-		p.resources <- *wrapper
+	//stupid check
+	if p.iAvailableNow() > p.min {
+		return
 	}
+
+	//lets assume to return this resource to the pool
+	//if we end up not needing to, lets undo our lock
+	if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
+		//decriment
+		atomic.AddUint32(&p.nAvailable, ^uint32(0))
+		p.resClose(wrapper.Resource)
+		atomic.AddUint32(&p.open, ^uint32(0))
+		return
+	}
+
+	p.resources <- *wrapper
 }
 
 /*
@@ -271,6 +333,8 @@ func (p *ResourcePool) Close() {
 		select {
 		case resource := <-p.resources:
 			p.resClose(resource.Resource)
+			p.open--
+			p.nAvailable--
 
 		default:
 			close(p.resources)
@@ -299,15 +363,15 @@ func (p *ResourcePool) ReportWait(d time.Duration) {
 Unsynced Accesss
 */
 func (p *ResourcePool) iAvailableNow() uint32 {
-	return uint32(len(p.resources)) //p.available
+	return atomic.LoadUint32(&p.nAvailable)
 }
 
 func (p *ResourcePool) iResourcesOpen() uint32 {
-	return p.open
+	return atomic.LoadUint32(&p.open)
 }
 
 func (p *ResourcePool) iCap() uint32 {
-	return uint32(cap(p.resources))
+	return p.maxOpen
 }
 
 func (p *ResourcePool) iInUse() uint32 {
@@ -325,8 +389,10 @@ Synced Access
 // Resources already obtained and available for use
 func (p *ResourcePool) AvailableNow() uint32 {
 
-	out := uint32(len(p.resources))
-	return out
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
+
+	return atomic.LoadUint32(&p.nAvailable)
 }
 
 // number of open resources (should be less than Cap())
@@ -351,9 +417,7 @@ func (p *ResourcePool) ResourcesOpen() uint32 {
 
 // Max resources the pool allows; all in use, obtained, and not obtained.
 func (p *ResourcePool) Cap() uint32 {
-
-	out := uint32(cap(p.resources))
-	return out
+	return p.maxOpen
 }
 
 type ResourcePoolStat struct {

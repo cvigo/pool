@@ -80,28 +80,29 @@ func TestBeyond(t *testing.T) {
 	}
 
 	defer p.Close()
+	const d = time.Millisecond * 50
 
-	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+	if _, err = p.getAvailable(time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+	if _, err = p.getAvailable(time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+	if _, err = p.getAvailable(time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+	if _, err = p.getAvailable(time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(time.Millisecond)); err != nil {
+	if _, err = p.getAvailable(time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(time.Microsecond)); err == nil {
+	if _, err = p.getAvailable(time.After(d)); err == nil {
 		t.Fatal("expected error on sixth get")
 	}
 
@@ -401,7 +402,7 @@ func TestAddingABumResource(t *testing.T) {
 	time.Sleep(time.Millisecond)
 
 	if p.AvailableNow() != min {
-		t.Fatal("Expected available now to be min")
+		t.Fatalf("Expected available now to be at min(%d) actually(%d)", min, p.AvailableNow())
 	}
 }
 
