@@ -2,7 +2,6 @@ package pool
 
 import (
 	"errors"
-	"log"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -543,7 +542,7 @@ func BenchmarkPool(b *testing.B) {
 
 }
 
-func BenchmarkPoolParallelDeferClose(b *testing.B) {
+func BenchmarkRealWorkMin(b *testing.B) {
 
 	create := func() (interface{}, error) {
 		r := new(resource_symulator)
@@ -560,62 +559,28 @@ func BenchmarkPoolParallelDeferClose(b *testing.B) {
 		return nil
 	}
 
-	p, f := NewPool(bmin, bmax, create, destroy, test, nil)
-	<-f
+	for nt := 0; nt < b.N; nt++ {
+		p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+		<-f
 
-	wg := &sync.WaitGroup{}
-	b.RunParallel(func(PB *testing.PB) {
-		for PB.Next() {
-
-			for v := 0; v < bgets; v++ {
-				wg.Add(1)
+		//10 people all getting stuff waiting a milisecond and returning the connection
+		wg := sync.WaitGroup{}
+		for i := 0; i < bmin; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 				r, _ := p.Get()
-
-				go func(w *ResourceWrapper, wg *sync.WaitGroup) {
-					defer wg.Done()
-					w.Close()
-				}(&r, wg)
-			}
-		}
-	})
-
-	log.Println("Waiting")
-	wg.Wait()
-	log.Println("Finishing")
-}
-
-func BenchmarkPoolParallel(b *testing.B) {
-
-	create := func() (interface{}, error) {
-		r := new(resource_symulator)
-		//assum that some real amount of work is being done here
-		time.Sleep(time.Millisecond)
-		return r, nil
-	}
-
-	destroy := func(r interface{}) {
-		_ = r.(*resource_symulator)
-	}
-
-	test := func(r interface{}) error {
-		return nil
-	}
-
-	p, f := NewPool(bmin, bmax, create, destroy, test, nil)
-	<-f
-
-	b.RunParallel(func(PB *testing.PB) {
-
-		for PB.Next() {
-			for v := 0; v < bgets; v++ {
-				r, _ := p.Get()
+				time.Sleep(time.Millisecond)
 				r.Close()
-			}
+			}()
 		}
-	})
+
+		wg.Wait()
+	}
+
 }
 
-func BenchmarkRealWork(b *testing.B) {
+func BenchmarkRealWork2Min(b *testing.B) {
 
 	create := func() (interface{}, error) {
 		r := new(resource_symulator)
@@ -639,6 +604,82 @@ func BenchmarkRealWork(b *testing.B) {
 		//10 people all getting stuff waiting a milisecond and returning the connection
 		wg := sync.WaitGroup{}
 		for i := 0; i < bmin*2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r, _ := p.Get()
+				time.Sleep(time.Millisecond)
+				r.Close()
+			}()
+		}
+
+		wg.Wait()
+	}
+
+}
+
+func BenchmarkRealWorkMax(b *testing.B) {
+
+	create := func() (interface{}, error) {
+		r := new(resource_symulator)
+		//assum that some real amount of work is being done here
+		time.Sleep(time.Millisecond)
+		return r, nil
+	}
+
+	destroy := func(r interface{}) {
+		_ = r.(*resource_symulator)
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	for nt := 0; nt < b.N; nt++ {
+		p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+		<-f
+
+		//10 people all getting stuff waiting a milisecond and returning the connection
+		wg := sync.WaitGroup{}
+		for i := 0; i < bmax; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r, _ := p.Get()
+				time.Sleep(time.Millisecond)
+				r.Close()
+			}()
+		}
+
+		wg.Wait()
+	}
+
+}
+
+func BenchmarkRealWork2Max(b *testing.B) {
+
+	create := func() (interface{}, error) {
+		r := new(resource_symulator)
+		//assum that some real amount of work is being done here
+		time.Sleep(time.Millisecond)
+		return r, nil
+	}
+
+	destroy := func(r interface{}) {
+		_ = r.(*resource_symulator)
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	for nt := 0; nt < b.N; nt++ {
+		p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+		<-f
+
+		//10 people all getting stuff waiting a milisecond and returning the connection
+		wg := sync.WaitGroup{}
+		for i := 0; i < bmax*2; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()

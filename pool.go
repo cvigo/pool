@@ -292,7 +292,9 @@ func (p *ResourcePool) releaseLock(wrapper *ResourceWrapper) {
 		return
 	}
 
-	p.nAvailable++
+	//even though we lock we need to atomicly increment
+	//nAvailable because get decriments it w/o locking
+	atomic.AddUint32(&p.nAvailable, 1)
 	p.resources <- *wrapper
 }
 
