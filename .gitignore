@@ -5,3 +5,5 @@ pubnubMessaging.log
 .DS_Store
 *.swp
 .agignore
+old.txt
+new.txt
