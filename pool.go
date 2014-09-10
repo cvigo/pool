@@ -225,8 +225,8 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
  */
 func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 
-	p.fMutex.Lock()
-	defer p.fMutex.Unlock()
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
 
 	//if this pool is closed when trying to release this resource
 	//just close resource
@@ -236,19 +236,13 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 		return
 	}
 
-	//remove resource from pool
 	if p.iAvailableNow() >= p.min {
-
+		atomic.AddUint32(&p.open, ^uint32(0))
 		p.resClose(wrapper.Resource)
-		//decriment
-		p.open--
-		wrapper.p = nil
-
-	} else {
-
-		//put it back in the available resources queue
-		p.resources <- *wrapper
+		return
 	}
+
+	p.resources <- *wrapper
 }
 
 /*
