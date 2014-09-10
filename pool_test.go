@@ -180,6 +180,7 @@ func TestExcluse(t *testing.T) {
 
 	var waitgroup sync.WaitGroup
 	check := make(map[int32]bool)
+	var l sync.Mutex
 
 	for i := 0; i < 40; i++ {
 
@@ -187,6 +188,9 @@ func TestExcluse(t *testing.T) {
 		go func(index int32) {
 
 			defer waitgroup.Done()
+			l.Lock()
+			defer l.Unlock()
+
 			obj, err := p.Get()
 			if err != nil {
 				t.Fatalf("Expected no error, got %s", err)
@@ -209,7 +213,7 @@ func TestExcluse(t *testing.T) {
 func TestResourceRelease(t *testing.T) {
 
 	var err error
-	var destroys uint32
+	var destroys uint32 = 0
 
 	create := func() (interface{}, error) {
 		return resourceNew()
@@ -376,7 +380,8 @@ func TestAddingABumResource(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test, nil)
+	p, f := NewPool(min, max, create, destroy, test, nil)
+	<-f
 	defer p.Close()
 
 	for index := 0; index < 50; index++ {
@@ -392,8 +397,11 @@ func TestAddingABumResource(t *testing.T) {
 		t.Fatal("Expected 0 in use")
 	}
 
-	if p.AvailableNow() >= min {
-		t.Fatal("Expected availableNow to be lower than min because of errors")
+	//let the pool fill
+	time.Sleep(time.Millisecond)
+
+	if p.AvailableNow() != min {
+		t.Fatal("Expected available now to be min")
 	}
 }
 
@@ -495,4 +503,102 @@ func TestTest(t *testing.T) {
 	if e == nil {
 		t.Fatal("expected error")
 	}
+}
+
+const (
+	bmin  = 5
+	bmax  = 50
+	bgets = 100
+)
+
+func BenchmarkPool(b *testing.B) {
+
+	create := func() (interface{}, error) {
+		r := new(resource_symulator)
+		//assum that some real amount of work is being done here
+		time.Sleep(time.Millisecond)
+		return r, nil
+	}
+
+	destroy := func(r interface{}) {
+		_ = r.(*resource_symulator)
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+	<-f
+
+	for i := 0; i < b.N; i++ {
+
+		for v := 0; v < bgets; v++ {
+			r, _ := p.Get()
+			r.Close()
+		}
+	}
+
+}
+
+func BenchmarkPoolParallelDeferClose(b *testing.B) {
+
+	create := func() (interface{}, error) {
+		r := new(resource_symulator)
+		//assum that some real amount of work is being done here
+		time.Sleep(time.Millisecond)
+		return r, nil
+	}
+
+	destroy := func(r interface{}) {
+		_ = r.(*resource_symulator)
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+	<-f
+
+	b.RunParallel(func(PB *testing.PB) {
+
+		for PB.Next() {
+			for v := 0; v < bgets; v++ {
+				r, _ := p.Get()
+				go r.Close()
+			}
+		}
+	})
+}
+
+func BenchmarkPoolParallel(b *testing.B) {
+
+	create := func() (interface{}, error) {
+		r := new(resource_symulator)
+		//assum that some real amount of work is being done here
+		time.Sleep(time.Millisecond)
+		return r, nil
+	}
+
+	destroy := func(r interface{}) {
+		_ = r.(*resource_symulator)
+	}
+
+	test := func(r interface{}) error {
+		return nil
+	}
+
+	p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+	<-f
+
+	b.RunParallel(func(PB *testing.PB) {
+
+		for PB.Next() {
+			for v := 0; v < bgets; v++ {
+				r, _ := p.Get()
+				r.Close()
+			}
+		}
+	})
 }

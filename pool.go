@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -99,33 +100,40 @@ func (p *ResourcePool) iShouldFill() bool {
 	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
 }
 
-func (p *ResourcePool) Fill() (error, bool) {
+func (p *ResourcePool) Fill() error {
 
-	p.fMutex.Lock()
-	defer p.fMutex.Unlock()
+	//fills should be able to run in parallel
+	p.fMutex.RLock()
+	defer p.fMutex.RUnlock()
 
 	if p.closed {
-		return PoolClosedError, false
+		return PoolClosedError
 	}
 
-	// make sure we are not going over limit
-	//our max > total open
-	if p.iShouldFill() {
-
-		resource, err := p.resOpen()
-
-		if err != nil {
-
-			//if we error, by definition we should still need to fill the pool
-			return err, true
-		}
-
-		wrapper := ResourceWrapper{p: p, Resource: resource}
-		p.resources <- wrapper
-		p.open++
+	if p.iAvailableNow() >= p.min {
+		return nil
 	}
 
-	return nil, p.iShouldFill()
+	//optimistic fill
+	//basically we assume we should fill, and say that we have done so
+	//if it turns out we are at our cap we undo that.
+	n_open := atomic.AddUint32(&p.open, 1)
+	if n_open >= p.iCap() {
+		//decriment
+		atomic.AddUint32(&p.open, ^uint32(0))
+		return nil
+	}
+
+	resource, err := p.resOpen()
+	if err != nil {
+		//decriment
+		atomic.AddUint32(&p.open, ^uint32(0))
+		return err
+	}
+
+	wrapper := ResourceWrapper{p: p, Resource: resource}
+	p.resources <- wrapper
+	return nil
 }
 
 //used to fill the pool till we hit our min available pool size
@@ -232,6 +240,7 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 	if p.iAvailableNow() >= p.min {
 
 		p.resClose(wrapper.Resource)
+		//decriment
 		p.open--
 		wrapper.p = nil
 
@@ -303,7 +312,7 @@ func (p *ResourcePool) iAvailableNow() uint32 {
 }
 
 func (p *ResourcePool) iResourcesOpen() uint32 {
-	return p.open
+	return atomic.LoadUint32(&p.open)
 }
 
 func (p *ResourcePool) iCap() uint32 {
