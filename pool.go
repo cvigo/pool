@@ -106,6 +106,10 @@ func (p *ResourcePool) iShouldFill() bool {
 	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
 }
 
+func (p *ResourcePool) Fill() error {
+	return p.FillAtomic()
+}
+
 func (p *ResourcePool) FillLock() error {
 
 	p.fMutex.Lock()
@@ -132,10 +136,6 @@ func (p *ResourcePool) FillLock() error {
 	return nil
 }
 
-func (p *ResourcePool) Fill() error {
-	return p.FillAtomic()
-}
-
 func (p *ResourcePool) FillAtomic() error {
 
 	//fills should be able to run in parallel
@@ -145,11 +145,6 @@ func (p *ResourcePool) FillAtomic() error {
 	//only things that write lock, close the pool therefor we can just read the value
 	if p.closed {
 		return PoolClosedError
-	}
-
-	//i don't undertsnd why these successive checks improve our benchmarking, but it does
-	if p.iAvailableNow() > p.min {
-		return nil
 	}
 
 	//optimistic changes
@@ -196,7 +191,9 @@ func (p *ResourcePool) FillToMin() (err error) {
 	for p.iShouldFill() {
 		resource, err := p.resOpen()
 		if err == nil {
-			p.nAvailable++
+			//even though we are locked, we still have to increase nAvailable atomicly
+			//because our get method decriments it w/o locking
+			atomic.AddUint32(&p.nAvailable, 1)
 			wrapper := ResourceWrapper{p: p, Resource: resource}
 			p.resources <- wrapper
 			p.open++
@@ -269,10 +266,40 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
 	}
 }
 
+func (p *ResourcePool) release(wrapper *ResourceWrapper) {
+	p.releaseLock(wrapper)
+}
+
+func (p *ResourcePool) releaseLock(wrapper *ResourceWrapper) {
+
+	p.fMutex.Lock()
+	defer p.fMutex.Unlock()
+
+	//if this pool is closed when trying to release this resource
+	//just close the resource
+	if p.closed {
+		p.resClose(wrapper.Resource)
+		p.open--
+		wrapper.p = nil
+		return
+	}
+
+	//if we have enought available
+	if p.nAvailable > p.min {
+		p.open--
+		p.resClose(wrapper.Resource)
+		wrapper.p = nil
+		return
+	}
+
+	p.nAvailable++
+	p.resources <- *wrapper
+}
+
 /*
  * Returns a resource back in to the Pool
  */
-func (p *ResourcePool) release(wrapper *ResourceWrapper) {
+func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
 
 	p.fMutex.RLock()
 	defer p.fMutex.RUnlock()
@@ -286,13 +313,9 @@ func (p *ResourcePool) release(wrapper *ResourceWrapper) {
 		return
 	}
 
-	//stupid check
-	if p.iAvailableNow() > p.min {
-		return
-	}
-
 	//lets assume to return this resource to the pool
 	//if we end up not needing to, lets undo our lock
+	//more expensive check
 	if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
 		//decriment
 		atomic.AddUint32(&p.nAvailable, ^uint32(0))
