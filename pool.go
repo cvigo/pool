@@ -15,6 +15,8 @@ type resourceClose func(interface{})
 type resourceTest func(interface{}) error
 
 var ResourceExhaustedError = errors.New("No Resources Available")
+var ResourceCreationError = errors.New("Resource creation failed")
+var ResourceTimeoutError = errors.New("Resource Get Timeout")
 var ResourceTestError = errors.New("Resource Failed Reuse Test")
 var PoolClosedError = errors.New("Pool is closed")
 
@@ -106,76 +108,6 @@ func (p *ResourcePool) iShouldFill() bool {
 	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
 }
 
-func (p *ResourcePool) Fill() error {
-	return p.FillAtomic()
-}
-
-func (p *ResourcePool) FillLock() error {
-
-	p.fMutex.Lock()
-	defer p.fMutex.Unlock()
-
-	if p.closed {
-		return PoolClosedError
-	}
-
-	// make sure we are not going over limit
-	//our max > total including outstanding
-	if p.iShouldFill() {
-		resource, err := p.resOpen()
-		if err == nil {
-			p.nAvailable++
-			wrapper := ResourceWrapper{p: p, Resource: resource}
-			p.resources <- wrapper
-			p.open++
-		} else {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (p *ResourcePool) FillAtomic() error {
-
-	//fills should be able to run in parallel
-	p.fMutex.RLock()
-	defer p.fMutex.RUnlock()
-
-	//only things that write lock, close the pool therefor we can just read the value
-	if p.closed {
-		return PoolClosedError
-	}
-
-	//optimistic changes
-	//We assume we need to add a resource, if in the process of aquiring the locks to do so
-	//we see we don't need to add a resource, we undo our lock
-	if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
-		atomic.AddUint32(&p.nAvailable, ^uint32(0))
-		return nil
-	}
-
-	//make sure we arn't going over our cap
-	if n_open := atomic.AddUint32(&p.open, 1); n_open > p.iCap() {
-		//decriment
-		atomic.AddUint32(&p.nAvailable, ^uint32(0))
-		atomic.AddUint32(&p.open, ^uint32(0))
-		return nil
-	}
-
-	resource, err := p.resOpen()
-	if err != nil {
-		//decriment
-		atomic.AddUint32(&p.nAvailable, ^uint32(0))
-		atomic.AddUint32(&p.open, ^uint32(0))
-		return err
-	}
-
-	wrapper := ResourceWrapper{p: p, Resource: resource}
-	p.resources <- wrapper
-	return nil
-}
-
 //used to fill the pool till we hit our min available pool size
 func (p *ResourcePool) FillToMin() (err error) {
 
@@ -196,7 +128,7 @@ func (p *ResourcePool) FillToMin() (err error) {
 			atomic.AddUint32(&p.nAvailable, 1)
 			wrapper := ResourceWrapper{p: p, Resource: resource}
 			p.resources <- wrapper
-			p.open++
+			atomic.AddUint32(&p.open, 1)
 		} else {
 			return err
 		}
@@ -226,6 +158,18 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 			continue
 		}
 
+		//if we are at our max open try again after a short sleep
+		if e == ResourceExhaustedError {
+			time.Sleep(time.Microsecond)
+			continue
+		}
+
+		//if we failed to create a new resource, try agaig after a short sleep
+		if e == ResourceCreationError {
+			time.Sleep(time.Microsecond)
+			continue
+		}
+
 		p.Report()
 		p.ReportWait(time.Now().Sub(start))
 		return r, e
@@ -234,10 +178,15 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 }
 
 // Fetch / create a new resource if available
+// Its technically possible to create a new resource after the pool is closed
+// thats okay, its still the callers responsibility to close/destroy that resource
 func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, error) {
 
 	//Wait for an object, or a timeout
 	select {
+	case <-timeout:
+		return ResourceWrapper{p: p, e: ResourceTimeoutError}, ResourceTimeoutError
+
 	case wrapper, ok := <-p.resources:
 
 		//pool is closed
@@ -252,50 +201,37 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
 		if p.resTest(wrapper.Resource) != nil {
 			p.resClose(wrapper.Resource)
 			wrapper.Close()
-			go p.Fill()
 			return ResourceWrapper{p: p, e: ResourceTestError}, ResourceTestError
 		}
 
 		//we got a valid resource to return
 		//signal the filler that we need to fill
-		go p.Fill()
 		return wrapper, wrapper.e
 
-	case <-timeout:
-		return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
+	//we don't have a resource available
+	//lets create one if we can
+	default:
+
+		//try to obtain a lock for a new resource
+		if n_open := atomic.AddUint32(&p.open, 1); n_open > p.iCap() {
+			//decriment
+			atomic.AddUint32(&p.open, ^uint32(0))
+			return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
+		}
+
+		resource, err := p.resOpen()
+		if err != nil {
+			//decriment
+			atomic.AddUint32(&p.open, ^uint32(0))
+			return ResourceWrapper{p: p, e: ResourceCreationError}, ResourceCreationError
+		}
+
+		return ResourceWrapper{p: p, Resource: resource}, nil
 	}
 }
 
 func (p *ResourcePool) release(wrapper *ResourceWrapper) {
-	p.releaseLock(wrapper)
-}
-
-func (p *ResourcePool) releaseLock(wrapper *ResourceWrapper) {
-
-	p.fMutex.Lock()
-	defer p.fMutex.Unlock()
-
-	//if this pool is closed when trying to release this resource
-	//just close the resource
-	if p.closed {
-		p.resClose(wrapper.Resource)
-		p.open--
-		wrapper.p = nil
-		return
-	}
-
-	//if we have enought available
-	if p.nAvailable > p.min {
-		p.open--
-		p.resClose(wrapper.Resource)
-		wrapper.p = nil
-		return
-	}
-
-	//even though we lock we need to atomicly increment
-	//nAvailable because get decriments it w/o locking
-	atomic.AddUint32(&p.nAvailable, 1)
-	p.resources <- *wrapper
+	p.releaseAtomic(wrapper)
 }
 
 /*
@@ -315,15 +251,16 @@ func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
 		return
 	}
 
-	//lets assume to return this resource to the pool
+	//obtain a lock to return the resource to the pool
 	//if we end up not needing to, lets undo our lock
-	//more expensive check
+	//and close the resource
 	if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
 		//decriment
 		atomic.AddUint32(&p.nAvailable, ^uint32(0))
 		p.resClose(wrapper.Resource)
 		atomic.AddUint32(&p.open, ^uint32(0))
 		return
+	} else {
 	}
 
 	p.resources <- *wrapper
@@ -331,18 +268,15 @@ func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
 
 /*
  * Remove a resource from the Pool.  This is helpful if the resource
- * has gone bad.  A new resource will be created in it's place.
+ * has gone bad.  A new resource will be created in it's place. once its asked for
+ * IE its possible to destroy resources in a pool bellow its min value
  */
 func (p *ResourcePool) destroy(wrapper *ResourceWrapper) {
 
-	p.fMutex.Lock()
-	defer p.fMutex.Unlock()
-
+	//you can destroy a resource if the pool is closed, no harm no foul
 	p.resClose(wrapper.Resource)
-	p.open--
+	atomic.AddUint32(&p.open, ^uint32(0))
 	wrapper.p = nil
-
-	go p.Fill()
 }
 
 // Remove all resources from the Pool.
@@ -358,9 +292,8 @@ func (p *ResourcePool) Close() {
 		select {
 		case resource := <-p.resources:
 			p.resClose(resource.Resource)
-			p.open--
-			p.nAvailable--
-
+			atomic.AddUint32(&p.nAvailable, ^uint32(0))
+			atomic.AddUint32(&p.open, ^uint32(0))
 		default:
 			close(p.resources)
 			return
@@ -371,7 +304,6 @@ func (p *ResourcePool) Close() {
 /**
 Metrics
 **/
-
 func (p *ResourcePool) Report() {
 	if p.Metrics != nil {
 		go p.Metrics.ReportResources(p.iStats())

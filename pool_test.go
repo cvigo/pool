@@ -384,25 +384,24 @@ func TestAddingABumResource(t *testing.T) {
 	p, f := NewPool(min, max, create, destroy, test, nil)
 	<-f
 	defer p.Close()
+	wg := sync.WaitGroup{}
 
 	for index := 0; index < 50; index++ {
-		func() {
-			r, err := p.Get()
-			if err == nil {
-				defer r.Close()
-			}
+		r, err := p.Get()
+		if err != nil {
+			t.Fatal("Expected no error")
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Close()
 		}()
 	}
 
+	wg.Wait()
+
 	if p.InUse() != 0 {
 		t.Fatal("Expected 0 in use")
-	}
-
-	//let the pool fill
-	time.Sleep(time.Millisecond)
-
-	if p.AvailableNow() != min {
-		t.Fatalf("Expected available now to be at min(%d) actually(%d)", min, p.AvailableNow())
 	}
 }
 
