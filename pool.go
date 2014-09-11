@@ -394,5 +394,6 @@ func (p *ResourcePool) Stats() ResourcePoolStat {
 
 	p.fMutex.RLock()
 	defer p.fMutex.RUnlock()
+
 	return p.iStats()
 }
