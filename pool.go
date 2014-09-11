@@ -332,7 +332,7 @@ func (p *ResourcePool) iCap() uint32 {
 }
 
 func (p *ResourcePool) iInUse() uint32 {
-	return p.open - p.iAvailableNow()
+	return p.iResourcesOpen() - p.iAvailableNow()
 }
 
 func (p *ResourcePool) iStats() ResourcePoolStat {

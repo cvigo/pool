@@ -4,4 +4,8 @@ BenchmarkRealWorkMin-4	     500	   7663097 ns/op
 BenchmarkRealWork2Min-4	     200	   9012670 ns/op
 BenchmarkRealWorkMax-4	     100	  16858213 ns/op
 BenchmarkRealWork2Max-4	     100	  26451888 ns/op
+
+26451888
+10698004
+
 ok  	github.com/bountylabs/pool	12.910s
