@@ -105,7 +105,7 @@ func NewPool(
 }
 
 func (p *ResourcePool) iShouldFill() bool {
-	return p.iAvailableNow() < p.min && p.iCap() > p.iResourcesOpen()
+	return p.iAvailableNow() < p.min && p.Cap() > p.iResourcesOpen()
 }
 
 //used to fill the pool till we hit our min available pool size
@@ -118,20 +118,31 @@ func (p *ResourcePool) FillToMin() (err error) {
 		return PoolClosedError
 	}
 
-	// make sure we are not going over limit
-	//our max > total including outstanding
-	for p.iShouldFill() {
+	for {
+		//obtain the lock for increasing the number of available resources
+		if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
+			//decriment
+			atomic.AddUint32(&p.nAvailable, ^uint32(0))
+			return
+		}
+
+		//obtain the lock for increasnig the total number of open resources
+		if nOpen := atomic.AddUint32(&p.open, 1); nOpen > p.Cap() {
+			//decriment
+			atomic.AddUint32(&p.nAvailable, ^uint32(0))
+			atomic.AddUint32(&p.open, ^uint32(0))
+			return
+		}
+
 		resource, err := p.resOpen()
-		if err == nil {
-			//even though we are locked, we still have to increase nAvailable atomicly
-			//because our get method decriments it w/o locking
-			atomic.AddUint32(&p.nAvailable, 1)
-			wrapper := ResourceWrapper{p: p, Resource: resource}
-			p.resources <- wrapper
-			atomic.AddUint32(&p.open, 1)
-		} else {
+		if err != nil {
+			atomic.AddUint32(&p.nAvailable, ^uint32(0))
+			atomic.AddUint32(&p.open, ^uint32(0))
 			return err
 		}
+
+		wrapper := ResourceWrapper{p: p, Resource: resource}
+		p.resources <- wrapper
 	}
 
 	return nil
@@ -213,7 +224,7 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
 	default:
 
 		//try to obtain a lock for a new resource
-		if n_open := atomic.AddUint32(&p.open, 1); n_open > p.iCap() {
+		if n_open := atomic.AddUint32(&p.open, 1); n_open > p.Cap() {
 			//decriment
 			atomic.AddUint32(&p.open, ^uint32(0))
 			return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
@@ -260,7 +271,6 @@ func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
 		p.resClose(wrapper.Resource)
 		atomic.AddUint32(&p.open, ^uint32(0))
 		return
-	} else {
 	}
 
 	p.resources <- *wrapper
@@ -327,16 +337,12 @@ func (p *ResourcePool) iResourcesOpen() uint32 {
 	return atomic.LoadUint32(&p.open)
 }
 
-func (p *ResourcePool) iCap() uint32 {
-	return p.maxOpen
-}
-
 func (p *ResourcePool) iInUse() uint32 {
 	return p.iResourcesOpen() - p.iAvailableNow()
 }
 
 func (p *ResourcePool) iStats() ResourcePoolStat {
-	out := ResourcePoolStat{AvailableNow: p.iAvailableNow(), ResourcesOpen: p.iResourcesOpen(), Cap: p.iCap(), InUse: p.iInUse()}
+	out := ResourcePoolStat{AvailableNow: p.iAvailableNow(), ResourcesOpen: p.iResourcesOpen(), Cap: p.Cap(), InUse: p.iInUse()}
 	return out
 }
 
