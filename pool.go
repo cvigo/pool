@@ -166,6 +166,7 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 
 		//if the test failed try again
 		if e == ResourceTestError {
+			time.Sleep(time.Microsecond)
 			continue
 		}
 
