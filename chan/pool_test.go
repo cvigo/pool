@@ -54,7 +54,7 @@ func TestIntialize(t *testing.T) {
 		t.Fatalf("Get Resource error: %s", err.Error())
 	}
 
-	if msg.Resource.(*resource_symulator).id != 1 {
+	if msg.Resource().(*resource_symulator).id != 1 {
 		t.Fatalf("Resource id should be on = %d", msg)
 	}
 }
@@ -191,7 +191,7 @@ func TestExcluse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Expected no error, got %s", err)
 			}
-			casted := obj.Resource.(*resource_symulator)
+			casted := obj.Resource().(*resource_symulator)
 			check[casted.id] = true
 
 		}(int32(i))
@@ -268,7 +268,7 @@ func TestAddingABumResource(t *testing.T) {
 			t.Fatal("Expected no error")
 		}
 		wg.Add(1)
-		go func(r *ResourceWrapper) {
+		go func(r ResourcePoolWrapper) {
 			defer wg.Done()
 			r.Close()
 		}(r)

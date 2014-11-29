@@ -20,7 +20,7 @@ var Timeout = errors.New("Timeout")
 var PoolClosedError = errors.New("Pool is closed")
 
 type ResourceWrapper struct {
-	Resource interface{}
+	resource interface{}
 	p        *ResourcePool
 	ticket   *int
 }
@@ -31,6 +31,16 @@ func (rw ResourceWrapper) Close() {
 
 func (rw ResourceWrapper) Destroy() {
 	rw.p.destroy(&rw)
+}
+
+func (rw ResourceWrapper) Resource() interface{} {
+	return rw.resource
+}
+
+type ResourcePoolWrapper interface {
+	Close()
+	Destroy()
+	Resource() interface{}
 }
 
 type ResourcePool struct {
@@ -82,11 +92,11 @@ func NewPool(
 	return p
 }
 
-func (p *ResourcePool) Get() (resource *ResourceWrapper, err error) {
+func (p *ResourcePool) Get() (resource ResourcePoolWrapper, err error) {
 	return p.GetWithTimeout(p.timeout)
 }
 
-func (p *ResourcePool) GetWithTimeout(timeout time.Duration) (resource *ResourceWrapper, err error) {
+func (p *ResourcePool) GetWithTimeout(timeout time.Duration) (resource ResourcePoolWrapper, err error) {
 
 	p.closedLock.RLock()
 	defer p.closedLock.RUnlock()
@@ -164,7 +174,7 @@ func (p *ResourcePool) openNewResource() (*ResourceWrapper, error) {
 			return nil, ResourceCreationError
 		}
 
-		return &ResourceWrapper{p: p, ticket: ticket, Resource: obj}, nil
+		return &ResourceWrapper{p: p, ticket: ticket, resource: obj}, nil
 
 	//if we couldn't get a ticket we have hit our max number of resources
 	default:
@@ -181,7 +191,7 @@ func (p *ResourcePool) release(r *ResourceWrapper) {
 
 	//if the pool is already closed just kill the resource
 	if p.closed {
-		p.resClose(r.Resource)
+		p.resClose(r.resource)
 		return
 	}
 
@@ -193,7 +203,7 @@ func (p *ResourcePool) release(r *ResourceWrapper) {
 		//the reserve is full, close the resource and put our ticket back
 		select {
 		case p.tickets <- r.ticket:
-			p.resClose(r.Resource)
+			p.resClose(r.resource)
 		default:
 			panic("Over Releasing Pool Resources")
 		}
@@ -208,13 +218,13 @@ func (p *ResourcePool) destroy(r *ResourceWrapper) {
 
 	//if the pool is already closed just kill the resource
 	if p.closed {
-		p.resClose(r.Resource)
+		p.resClose(r.resource)
 		return
 	}
 
 	select {
 	case p.tickets <- r.ticket:
-		p.resClose(r.Resource)
+		p.resClose(r.resource)
 	default:
 		panic("Over Destroying Pool Resources")
 	}
@@ -247,7 +257,7 @@ func (p *ResourcePool) drainReserve() {
 	for {
 		select {
 		case resource := <-p.reserve:
-			p.resClose(resource.Resource)
+			p.resClose(resource.resource)
 		default:
 			close(p.reserve)
 			return
