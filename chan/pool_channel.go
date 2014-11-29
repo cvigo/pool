@@ -19,21 +19,21 @@ var ResourceTestError = errors.New("Resource Test Failed")
 var Timeout = errors.New("Timeout")
 var PoolClosedError = errors.New("Pool is closed")
 
-type ResourceWrapper struct {
+type resourceWrapper struct {
 	resource interface{}
 	p        *ResourcePool
 	ticket   *int
 }
 
-func (rw ResourceWrapper) Close() {
+func (rw resourceWrapper) Close() {
 	rw.p.release(&rw)
 }
 
-func (rw ResourceWrapper) Destroy() {
+func (rw resourceWrapper) Destroy() {
 	rw.p.destroy(&rw)
 }
 
-func (rw ResourceWrapper) Resource() interface{} {
+func (rw resourceWrapper) Resource() interface{} {
 	return rw.resource
 }
 
@@ -47,7 +47,7 @@ type ResourcePool struct {
 	metrics pool.PoolMetrics //metrics interface to track how the pool performs
 	timeout time.Duration    //when aquiring a resource, how long should we wait before timining out
 
-	reserve chan *ResourceWrapper //channel of available resources
+	reserve chan *resourceWrapper //channel of available resources
 	tickets chan *int             //channel of available tickets to create a resource
 
 	//callbacks for opening, testing and closing a resource
@@ -75,7 +75,7 @@ func NewPool(
 
 	//create the pool
 	p := &ResourcePool{
-		reserve:  make(chan *ResourceWrapper, maxReserve),
+		reserve:  make(chan *resourceWrapper, maxReserve),
 		tickets:  make(chan *int, maxOpen),
 		resOpen:  o,
 		resClose: c,
@@ -142,7 +142,7 @@ func (p *ResourcePool) GetWithTimeout(timeout time.Duration) (resource ResourceP
 }
 
 // Borrow a Resource from the pool, create one if we can
-func (p *ResourcePool) getAvailable() (*ResourceWrapper, error) {
+func (p *ResourcePool) getAvailable() (*resourceWrapper, error) {
 	select {
 	case r := <-p.reserve:
 
@@ -160,7 +160,7 @@ func (p *ResourcePool) getAvailable() (*ResourceWrapper, error) {
 
 }
 
-func (p *ResourcePool) openNewResource() (*ResourceWrapper, error) {
+func (p *ResourcePool) openNewResource() (*resourceWrapper, error) {
 
 	select {
 
@@ -174,7 +174,7 @@ func (p *ResourcePool) openNewResource() (*ResourceWrapper, error) {
 			return nil, ResourceCreationError
 		}
 
-		return &ResourceWrapper{p: p, ticket: ticket, resource: obj}, nil
+		return &resourceWrapper{p: p, ticket: ticket, resource: obj}, nil
 
 	//if we couldn't get a ticket we have hit our max number of resources
 	default:
@@ -184,7 +184,7 @@ func (p *ResourcePool) openNewResource() (*ResourceWrapper, error) {
 }
 
 // Return returns a Resource to the pool.
-func (p *ResourcePool) release(r *ResourceWrapper) {
+func (p *ResourcePool) release(r *resourceWrapper) {
 
 	p.closedLock.RLock()
 	defer p.closedLock.RUnlock()
@@ -211,7 +211,7 @@ func (p *ResourcePool) release(r *ResourceWrapper) {
 }
 
 // Removes a Resource
-func (p *ResourcePool) destroy(r *ResourceWrapper) {
+func (p *ResourcePool) destroy(r *resourceWrapper) {
 
 	p.closedLock.RLock()
 	defer p.closedLock.RUnlock()
