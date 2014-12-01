@@ -3,7 +3,6 @@ package pool_channel
 
 import (
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/bountylabs/pool"
@@ -54,9 +53,6 @@ type ResourcePool struct {
 	resOpen  func() (interface{}, error)
 	resClose func(interface{}) //we can't do anything with a close error
 	resTest  func(interface{}) error
-
-	closedLock sync.RWMutex
-	closed     bool
 }
 
 // NewPool creates a new pool of Clients.
@@ -98,14 +94,6 @@ func (p *ResourcePool) Get() (resource ResourcePoolWrapper, err error) {
 
 func (p *ResourcePool) GetWithTimeout(timeout time.Duration) (resource ResourcePoolWrapper, err error) {
 
-	p.closedLock.RLock()
-	defer p.closedLock.RUnlock()
-
-	//if the pool is closed we have to bail
-	if p.closed {
-		return nil, PoolClosedError
-	}
-
 	start := time.Now()
 
 	for {
@@ -134,7 +122,6 @@ func (p *ResourcePool) GetWithTimeout(timeout time.Duration) (resource ResourceP
 			continue
 		}
 
-		p.report()
 		p.reportWait(time.Now().Sub(start))
 		return r, e
 	}
@@ -144,7 +131,11 @@ func (p *ResourcePool) GetWithTimeout(timeout time.Duration) (resource ResourceP
 // Borrow a Resource from the pool, create one if we can
 func (p *ResourcePool) getAvailable() (*resourceWrapper, error) {
 	select {
-	case r := <-p.reserve:
+	case r, ok := <-p.reserve:
+
+		if ok == false {
+			return nil, PoolClosedError
+		}
 
 		//test that the re-used resource is still good
 		if err := p.resTest(r.r); err != nil {
@@ -165,12 +156,23 @@ func (p *ResourcePool) openNewResource() (*resourceWrapper, error) {
 	select {
 
 	//aquire a ticket to open a resource
-	case ticket := <-p.tickets:
+	case ticket, ok := <-p.tickets:
+
+		if ok == false {
+			return nil, PoolClosedError
+		}
+
 		obj, err := p.resOpen()
 
 		//if the open fails, return our ticket
 		if err != nil {
-			p.tickets <- ticket
+
+			//if the pool is closed let the ticket go
+			select {
+			case p.tickets <- ticket:
+			default:
+			}
+
 			return nil, ResourceCreationError
 		}
 
@@ -186,26 +188,18 @@ func (p *ResourcePool) openNewResource() (*resourceWrapper, error) {
 // Return returns a Resource to the pool.
 func (p *ResourcePool) release(r *resourceWrapper) {
 
-	p.closedLock.RLock()
-	defer p.closedLock.RUnlock()
-
-	//if the pool is already closed just kill the resource
-	if p.closed {
-		p.resClose(r.r)
-		return
-	}
-
 	//put the resource back in the cache
 	select {
 	case p.reserve <- r:
 	default:
 
 		//the reserve is full, close the resource and put our ticket back
+		p.resClose(r.r)
+
+		//if tickets is closed, whatever
 		select {
 		case p.tickets <- r.t:
-			p.resClose(r.r)
 		default:
-			panic("Over Releasing Pool Resources")
 		}
 	}
 }
@@ -213,29 +207,17 @@ func (p *ResourcePool) release(r *resourceWrapper) {
 // Removes a Resource
 func (p *ResourcePool) destroy(r *resourceWrapper) {
 
-	p.closedLock.RLock()
-	defer p.closedLock.RUnlock()
+	p.resClose(r.r)
 
-	//if the pool is already closed just kill the resource
-	if p.closed {
-		p.resClose(r.r)
-		return
-	}
-
+	//if tickets are closed, whatever
 	select {
 	case p.tickets <- r.t:
-		p.resClose(r.r)
 	default:
-		panic("Over Destroying Pool Resources")
 	}
 }
 
 func (p *ResourcePool) Close() {
 
-	p.closedLock.Lock()
-	defer p.closedLock.Unlock()
-
-	p.closed = true
 	p.drainReserve()
 	p.drainTickets()
 }
@@ -268,15 +250,10 @@ func (p *ResourcePool) drainReserve() {
 /**
 Metrics
 **/
-func (p *ResourcePool) report() {
-	if p.metrics != nil {
-		go p.metrics.ReportResources(p.Stats())
-	}
-}
-
 func (p *ResourcePool) reportWait(d time.Duration) {
 	if p.metrics != nil {
 		go p.metrics.ReportWait(d)
+		go p.metrics.ReportResources(p.Stats())
 	}
 }
 
