@@ -12,20 +12,25 @@ var (
 	no int32
 )
 
-type resource_symulator struct {
-	id int32
+type resource_simulator struct {
+	text string
+	id   int32
 }
 
-func resourceNew() (r *resource_symulator, err error) {
+type ParamType resource_simulator
 
-	r = new(resource_symulator)
-	r.id = atomic.AddInt32(&no, 1)
+func resourceNew(param interface{}) (r *resource_simulator, err error) {
+
+	r = new(resource_simulator)
+	r.id = atomic.AddInt32(&no, param.(*ParamType).id)
+	r.text = param.(*ParamType).text
 	time.Sleep(time.Microsecond * 1)
 	return
 }
 
-func (r *resource_symulator) resourceDel() (err error) {
+func (r *resource_simulator) resourceDel() (err error) {
 	r.id = 0
+	r.text = ""
 	time.Sleep(time.Microsecond * 1)
 	return
 }
@@ -33,12 +38,12 @@ func (r *resource_symulator) resourceDel() (err error) {
 func TestIntialize(t *testing.T) {
 
 	var err error
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -46,7 +51,7 @@ func TestIntialize(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(2, 5, create, destroy, test, nil)
+	p, _ := NewPool(0, 5, create, destroy, test, nil, &ParamType{text: "text", id: 2})
 	defer p.Close()
 
 	msg, err := p.Get()
@@ -54,19 +59,19 @@ func TestIntialize(t *testing.T) {
 		t.Fatalf("Get Resource error: %s", err.Error())
 	}
 
-	if msg.Resource.(*resource_symulator).id != 1 {
-		t.Fatalf("Resource id should be on = %d", msg)
+	if msg.Resource.(*resource_simulator).id != 2 {
+		t.Fatalf("Resource id should be '2' but is '%v'", msg.Resource.(*resource_simulator).id)
 	}
 }
 
 func TestBeyond(t *testing.T) {
 
 	var err error
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -74,7 +79,7 @@ func TestBeyond(t *testing.T) {
 		return nil
 	}
 
-	p, f := NewPool(2, 5, create, destroy, test, nil)
+	p, f := NewPool(2, 5, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	if <-f != nil {
 		t.Fatal("Expected no error")
 	}
@@ -82,27 +87,27 @@ func TestBeyond(t *testing.T) {
 	defer p.Close()
 	const d = time.Millisecond * 50
 
-	if _, err = p.getAvailable(time.After(d)); err != nil {
+	if _, err = p.getAvailable(p.param, time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(d)); err != nil {
+	if _, err = p.getAvailable(p.param, time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(d)); err != nil {
+	if _, err = p.getAvailable(p.param, time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(d)); err != nil {
+	if _, err = p.getAvailable(p.param, time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(d)); err != nil {
+	if _, err = p.getAvailable(p.param, time.After(d)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = p.getAvailable(time.After(d)); err == nil {
+	if _, err = p.getAvailable(p.param, time.After(d)); err == nil {
 		t.Fatal("expected error on sixth get")
 	}
 
@@ -116,12 +121,12 @@ func TestWait(t *testing.T) {
 
 	var err error
 
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -129,7 +134,7 @@ func TestWait(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(2, 5, create, destroy, test, nil)
+	p, _ := NewPool(2, 5, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	defer p.Close()
 
 	_, err = p.Get()
@@ -158,12 +163,12 @@ func TestWait(t *testing.T) {
 
 func TestExcluse(t *testing.T) {
 
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -172,11 +177,12 @@ func TestExcluse(t *testing.T) {
 	}
 
 	var min, max uint32
-	min = 10
+	min = 40
 	max = 50
 
 	no = 0
-	p, _ := NewPool(min, max, create, destroy, test, nil)
+	p, err := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 2})
+	<-err
 	defer p.Close()
 
 	var waitgroup sync.WaitGroup
@@ -196,15 +202,16 @@ func TestExcluse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Expected no error, got %s", err)
 			}
-			casted := obj.Resource.(*resource_symulator)
+			casted := obj.Resource.(*resource_simulator)
 			check[casted.id] = true
+			//t.Logf("Resource created. ID = %v", casted.id)
 
 		}(int32(i))
 	}
 
 	waitgroup.Wait()
 
-	for i := 1; i <= 40; i++ {
+	for i := 2; i <= 80; i+=2 {
 		if check[int32(i)] == false {
 			t.Fatalf("Resource %d unused", i)
 		}
@@ -216,14 +223,14 @@ func TestResourceRelease(t *testing.T) {
 	var err error
 	var destroys uint32 = 0
 
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 
 	destroy := func(r interface{}) {
 
 		destroys++
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -234,7 +241,7 @@ func TestResourceRelease(t *testing.T) {
 	var min, max uint32
 	min = 10
 	max = 50
-	p, fillChan := NewPool(min, max, create, destroy, test, nil)
+	p, fillChan := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	defer p.Close()
 	<-fillChan //wait for the pool to fill
 
@@ -309,19 +316,19 @@ func TestClose(t *testing.T) {
 	max = 50
 	var i int
 
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 	destroy := func(r interface{}) {
 		i++
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 	test := func(r interface{}) error {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test, nil)
+	p, _ := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 
 	count := int(p.ResourcesOpen())
 	p.Close()
@@ -336,18 +343,18 @@ func TestPoolClose(t *testing.T) {
 	min = 10
 	max = 50
 
-	create := func() (interface{}, error) {
-		return resourceNew()
+	create := func(param interface{}) (interface{}, error) {
+		return resourceNew(param)
 	}
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 	test := func(r interface{}) error {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test, nil)
+	p, _ := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	p.Close()
 	_, err := p.Get()
 	if err != PoolClosedError {
@@ -362,18 +369,17 @@ func TestAddingABumResource(t *testing.T) {
 	max = 50
 	i := 0
 
-	create := func() (interface{}, error) {
-
+	create := func(param interface{}) (interface{}, error) {
 		i++
 		if i%2 == 0 {
 			return nil, errors.New("Create Error")
 		}
 
-		return resourceNew()
+		return resourceNew(param)
 	}
 
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -381,7 +387,7 @@ func TestAddingABumResource(t *testing.T) {
 		return nil
 	}
 
-	p, f := NewPool(min, max, create, destroy, test, nil)
+	p, f := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	<-f
 	defer p.Close()
 	wg := sync.WaitGroup{}
@@ -412,13 +418,13 @@ func TestCreateError(t *testing.T) {
 	max = 50
 	var i int = 0
 
-	create := func() (interface{}, error) {
+	create := func(param interface{}) (interface{}, error) {
 		i++
 		return nil, errors.New("Some error")
 	}
 
 	destroy := func(r interface{}) {
-		db := r.(*resource_symulator)
+		db := r.(*resource_simulator)
 		db.resourceDel()
 	}
 
@@ -426,7 +432,7 @@ func TestCreateError(t *testing.T) {
 		return nil
 	}
 
-	p, _ := NewPool(min, max, create, destroy, test, nil)
+	p, _ := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	p.TimeoutTime = time.Microsecond
 	defer p.Close()
 
@@ -468,9 +474,9 @@ func TestTest(t *testing.T) {
 	var i uint32 = 0
 	var tested uint32 = 0
 
-	create := func() (interface{}, error) {
+	create := func(param interface{}) (interface{}, error) {
 		i++
-		return resourceNew()
+		return resourceNew(param)
 	}
 
 	destroy := func(r interface{}) {
@@ -482,7 +488,7 @@ func TestTest(t *testing.T) {
 		return errors.New("Reuse Error")
 	}
 
-	p, fillChannel := NewPool(min, max, create, destroy, test, nil)
+	p, fillChannel := NewPool(min, max, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	p.TimeoutTime = time.Microsecond
 	defer p.Close()
 	<-fillChannel
@@ -513,22 +519,22 @@ const (
 
 func BenchmarkPool(b *testing.B) {
 
-	create := func() (interface{}, error) {
-		r := new(resource_symulator)
+	create := func(param interface{}) (interface{}, error) {
+		r := new(resource_simulator)
 		//assum that some real amount of work is being done here
 		time.Sleep(time.Millisecond)
 		return r, nil
 	}
 
 	destroy := func(r interface{}) {
-		_ = r.(*resource_symulator)
+		_ = r.(*resource_simulator)
 	}
 
 	test := func(r interface{}) error {
 		return nil
 	}
 
-	p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+	p, f := NewPool(bmin, bmax, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 	<-f
 
 	for i := 0; i < b.N; i++ {
@@ -543,15 +549,15 @@ func BenchmarkPool(b *testing.B) {
 
 func benchmarkRealWork(b *testing.B, n int) {
 
-	create := func() (interface{}, error) {
-		r := new(resource_symulator)
+	create := func(param interface{}) (interface{}, error) {
+		r := new(resource_simulator)
 		//assum that some real amount of work is being done here
 		time.Sleep(time.Millisecond)
 		return r, nil
 	}
 
 	destroy := func(r interface{}) {
-		_ = r.(*resource_symulator)
+		_ = r.(*resource_simulator)
 	}
 
 	test := func(r interface{}) error {
@@ -559,7 +565,7 @@ func benchmarkRealWork(b *testing.B, n int) {
 	}
 
 	for nt := 0; nt < b.N; nt++ {
-		p, f := NewPool(bmin, bmax, create, destroy, test, nil)
+		p, f := NewPool(bmin, bmax, create, destroy, test, nil, &ParamType{text: "text", id: 1})
 		<-f
 
 		//10 people all getting stuff waiting a milisecond and returning the connection

@@ -10,7 +10,7 @@ import (
 )
 
 //callbacks
-type resourceOpen func() (interface{}, error)
+type resourceOpen func(interface{}) (interface{}, error)
 type resourceClose func(interface{})
 type resourceTest func(interface{}) error
 
@@ -39,9 +39,12 @@ type ResourcePool struct {
 	resources chan ResourceWrapper //channel of available resources
 
 	//callbacks for opening, testing and closing a resource
-	resOpen  func() (interface{}, error)
+	resOpen  func(interface{}) (interface{}, error)
 	resClose func(interface{}) //we can't do anything with a close error
 	resTest  func(interface{}) error
+
+	// Resource initialization info
+	param interface{}
 }
 
 type ResourceWrapper struct {
@@ -81,6 +84,7 @@ func NewPool(
 	c resourceClose,
 	t resourceTest,
 	metrics PoolMetrics,
+	param interface{},
 ) (*ResourcePool, chan error) {
 
 	p := new(ResourcePool)
@@ -93,6 +97,7 @@ func NewPool(
 	p.resTest = t
 	p.TimeoutTime = time.Second
 	p.Metrics = metrics
+	p.param = param
 
 	//fill the pool to the min
 	errChannel := make(chan error, 1)
@@ -134,7 +139,7 @@ func (p *ResourcePool) FillToMin() (err error) {
 			return
 		}
 
-		resource, err := p.resOpen()
+		resource, err := p.resOpen(p.param)
 		if err != nil {
 			atomic.AddUint32(&p.nAvailable, ^uint32(0))
 			atomic.AddUint32(&p.open, ^uint32(0))
@@ -152,17 +157,17 @@ func (p *ResourcePool) FillToMin() (err error) {
 // has not been reached, it will create a new one using the factory. Otherwise,
 // it will indefinitely wait untill the next resource becomes available.
 func (p *ResourcePool) Get() (resource ResourceWrapper, err error) {
-	return p.getWait()
+	return p.getWait(p.param)
 }
 
 // Fetch a new resource and wait if none are available
-func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
+func (p *ResourcePool) getWait(param interface{}) (resource ResourceWrapper, err error) {
 
 	start := time.Now()
 	timeout := time.After(p.TimeoutTime)
 
 	for {
-		r, e := p.getAvailable(timeout)
+		r, e := p.getAvailable(param, timeout)
 
 		//if the test failed try again
 		if e == ResourceTestError {
@@ -192,7 +197,7 @@ func (p *ResourcePool) getWait() (resource ResourceWrapper, err error) {
 // Fetch / create a new resource if available
 // Its technically possible to create a new resource after the pool is closed
 // thats okay, its still the callers responsibility to close/destroy that resource
-func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, error) {
+func (p *ResourcePool) getAvailable(param interface{}, timeout <-chan time.Time) (ResourceWrapper, error) {
 
 	//Wait for an object, or a timeout
 	select {
@@ -231,7 +236,7 @@ func (p *ResourcePool) getAvailable(timeout <-chan time.Time) (ResourceWrapper, 
 			return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
 		}
 
-		resource, err := p.resOpen()
+		resource, err := p.resOpen(param)
 		if err != nil {
 			//decriment
 			atomic.AddUint32(&p.open, ^uint32(0))
