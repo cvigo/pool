@@ -2,6 +2,7 @@
 package pool
 
 import (
+	"context"
 	"errors"
 	"log"
 	"sync"
@@ -10,9 +11,9 @@ import (
 )
 
 //callbacks
-type resourceOpen func(interface{}) (interface{}, error)
-type resourceClose func(interface{})
-type resourceTest func(interface{}) error
+type resourceOpen func(ctx context.Context) (interface{}, error)
+type resourceClose func(context.Context, interface{})
+type resourceTest func(context.Context, interface{}) error
 
 var ResourceExhaustedError = errors.New("No Resources Available")
 var ResourceCreationError = errors.New("Resource creation failed")
@@ -29,6 +30,8 @@ type ResourcePool struct {
 	open    uint32       //number of resources that are open (including in use by the client)
 	maxOpen uint32       //max number of open resources
 
+	purgeFailed bool // destroy the resources which test have failed
+
 	//number of resources theoretically on the channel, this may differ from the actual length
 	//while the resources are actually being created and added
 	nAvailable uint32
@@ -39,12 +42,9 @@ type ResourcePool struct {
 	resources chan ResourceWrapper //channel of available resources
 
 	//callbacks for opening, testing and closing a resource
-	resOpen  func(interface{}) (interface{}, error)
-	resClose func(interface{}) //we can't do anything with a close error
-	resTest  func(interface{}) error
-
-	// Resource initialization info
-	param interface{}
+	resOpen  func(ctx context.Context) (interface{}, error)
+	resClose func(context.Context, interface{}) //we can't do anything with a close error
+	resTest  func(context.Context, interface{}) error
 }
 
 type ResourceWrapper struct {
@@ -53,24 +53,34 @@ type ResourceWrapper struct {
 	e        error
 }
 
-func (rw ResourceWrapper) Close() {
+func (rw ResourceWrapper) Release(ctx context.Context) {
 
 	if rw.e != nil {
 		log.Println("Can't close a bum resource")
 		return
 	}
 
-	rw.p.release(&rw)
+	rw.p.release(ctx, &rw)
 }
 
-func (rw ResourceWrapper) Destroy() {
+func (rw ResourceWrapper) Destroy(ctx context.Context) {
 
 	if rw.e != nil {
 		log.Println("Can't destroy a bum resource")
 		return
 	}
 
-	rw.p.destroy(&rw)
+	rw.p.destroy(ctx, &rw)
+}
+
+type Cfg struct {
+	Min         uint32
+	Max         uint32
+	OpenFunc    resourceOpen
+	CloseFunc   resourceClose
+	TestFunc    resourceTest
+	Metrics     PoolMetrics
+	PurgeFailed bool
 }
 
 /*
@@ -78,32 +88,27 @@ func (rw ResourceWrapper) Destroy() {
  * Caller can decide to wait on the pool to fill
  */
 func NewPool(
-	min uint32,
-	max uint32,
-	o resourceOpen,
-	c resourceClose,
-	t resourceTest,
-	metrics PoolMetrics,
-	param interface{},
+	ctx context.Context,
+	cfg Cfg,
 ) (*ResourcePool, chan error) {
 
 	p := new(ResourcePool)
-	p.min = min
+	p.min = cfg.Min
 
-	p.resources = make(chan ResourceWrapper, max)
-	p.maxOpen = max
-	p.resOpen = o
-	p.resClose = c
-	p.resTest = t
+	p.resources = make(chan ResourceWrapper, cfg.Max)
+	p.maxOpen = cfg.Max
+	p.resOpen = cfg.OpenFunc
+	p.resClose = cfg.CloseFunc
+	p.resTest = cfg.TestFunc
 	p.TimeoutTime = time.Second
-	p.Metrics = metrics
-	p.param = param
+	p.Metrics = cfg.Metrics
+	p.purgeFailed = cfg.PurgeFailed
 
 	//fill the pool to the min
 	errChannel := make(chan error, 1)
 	go func() {
 		defer close(errChannel)
-		errChannel <- p.FillToMin()
+		errChannel <- p.FillToMin(ctx)
 	}()
 
 	return p, errChannel
@@ -114,7 +119,7 @@ func (p *ResourcePool) iShouldFill() bool {
 }
 
 //used to fill the pool till we hit our min available pool size
-func (p *ResourcePool) FillToMin() (err error) {
+func (p *ResourcePool) FillToMin(ctx context.Context) (err error) {
 
 	p.fMutex.Lock()
 	defer p.fMutex.Unlock()
@@ -126,20 +131,20 @@ func (p *ResourcePool) FillToMin() (err error) {
 	for {
 		//obtain the lock for increasing the number of available resources
 		if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
-			//decriment
+			//decrement
 			atomic.AddUint32(&p.nAvailable, ^uint32(0))
 			return
 		}
 
 		//obtain the lock for increasnig the total number of open resources
 		if nOpen := atomic.AddUint32(&p.open, 1); nOpen > p.Cap() {
-			//decriment
+			//decrement
 			atomic.AddUint32(&p.nAvailable, ^uint32(0))
 			atomic.AddUint32(&p.open, ^uint32(0))
 			return
 		}
 
-		resource, err := p.resOpen(p.param)
+		resource, err := p.resOpen(ctx)
 		if err != nil {
 			atomic.AddUint32(&p.nAvailable, ^uint32(0))
 			atomic.AddUint32(&p.open, ^uint32(0))
@@ -148,6 +153,12 @@ func (p *ResourcePool) FillToMin() (err error) {
 
 		wrapper := ResourceWrapper{p: p, Resource: resource}
 		p.resources <- wrapper
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// carry on
+		}
 	}
 
 	return nil
@@ -155,19 +166,18 @@ func (p *ResourcePool) FillToMin() (err error) {
 
 // Get will return the next available resource. If capacity
 // has not been reached, it will create a new one using the factory. Otherwise,
-// it will indefinitely wait untill the next resource becomes available.
-func (p *ResourcePool) Get() (resource ResourceWrapper, err error) {
-	return p.getWait(p.param)
+// it will indefinitely wait until the next resource becomes available.
+func (p *ResourcePool) Get(ctx context.Context) (resource ResourceWrapper, err error) {
+	return p.getWait(ctx)
 }
 
 // Fetch a new resource and wait if none are available
-func (p *ResourcePool) getWait(param interface{}) (resource ResourceWrapper, err error) {
+func (p *ResourcePool) getWait(ctx context.Context) (resource ResourceWrapper, err error) {
 
 	start := time.Now()
-	timeout := time.After(p.TimeoutTime)
 
 	for {
-		r, e := p.getAvailable(param, timeout)
+		r, e := p.getAvailable(ctx)
 
 		//if the test failed try again
 		if e == ResourceTestError {
@@ -197,12 +207,12 @@ func (p *ResourcePool) getWait(param interface{}) (resource ResourceWrapper, err
 // Fetch / create a new resource if available
 // Its technically possible to create a new resource after the pool is closed
 // thats okay, its still the callers responsibility to close/destroy that resource
-func (p *ResourcePool) getAvailable(param interface{}, timeout <-chan time.Time) (ResourceWrapper, error) {
+func (p *ResourcePool) getAvailable(ctx context.Context) (ResourceWrapper, error) {
 
 	//Wait for an object, or a timeout
 	select {
-	case <-timeout:
-		return ResourceWrapper{p: p, e: ResourceTimeoutError}, ResourceTimeoutError
+	case <-ctx.Done():
+		return ResourceWrapper{p: p, e: ctx.Err()}, ctx.Err()
 
 	case wrapper, ok := <-p.resources:
 
@@ -211,13 +221,17 @@ func (p *ResourcePool) getAvailable(param interface{}, timeout <-chan time.Time)
 			return ResourceWrapper{p: p, e: PoolClosedError}, PoolClosedError
 		}
 
-		//decriment the number of available resources
+		//decrement the number of available resources
 		atomic.AddUint32(&p.nAvailable, ^uint32(0))
 
 		//if the resource fails the test, close it and wait to get another resource
-		if p.resTest(wrapper.Resource) != nil {
-			p.resClose(wrapper.Resource)
-			wrapper.Close()
+		if p.resTest(ctx, wrapper.Resource) != nil {
+			p.resClose(ctx, wrapper.Resource)
+			if p.purgeFailed {
+				wrapper.Destroy(ctx)
+			} else {
+				wrapper.Release(ctx)
+			}
 			return ResourceWrapper{p: p, e: ResourceTestError}, ResourceTestError
 		}
 
@@ -225,8 +239,8 @@ func (p *ResourcePool) getAvailable(param interface{}, timeout <-chan time.Time)
 		//signal the filler that we need to fill
 		return wrapper, wrapper.e
 
-	//we don't have a resource available
-	//lets create one if we can
+		//we don't have a resource available
+		//lets create one if we can
 	default:
 
 		//try to obtain a lock for a new resource
@@ -236,7 +250,7 @@ func (p *ResourcePool) getAvailable(param interface{}, timeout <-chan time.Time)
 			return ResourceWrapper{p: p, e: ResourceExhaustedError}, ResourceExhaustedError
 		}
 
-		resource, err := p.resOpen(param)
+		resource, err := p.resOpen(ctx)
 		if err != nil {
 			//decriment
 			atomic.AddUint32(&p.open, ^uint32(0))
@@ -247,14 +261,14 @@ func (p *ResourcePool) getAvailable(param interface{}, timeout <-chan time.Time)
 	}
 }
 
-func (p *ResourcePool) release(wrapper *ResourceWrapper) {
-	p.releaseAtomic(wrapper)
+func (p *ResourcePool) release(ctx context.Context, wrapper *ResourceWrapper) {
+	p.releaseAtomic(ctx, wrapper)
 }
 
 /*
  * Returns a resource back in to the Pool
  */
-func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
+func (p *ResourcePool) releaseAtomic(ctx context.Context, wrapper *ResourceWrapper) {
 
 	p.fMutex.RLock()
 	defer p.fMutex.RUnlock()
@@ -262,7 +276,7 @@ func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
 	//if this pool is closed when trying to release this resource
 	//just close the resource
 	if p.closed == true {
-		p.resClose(wrapper.Resource)
+		p.resClose(ctx, wrapper.Resource)
 		atomic.AddUint32(&p.open, ^uint32(0))
 		wrapper.p = nil
 		return
@@ -274,7 +288,7 @@ func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
 	if nAvailable := atomic.AddUint32(&p.nAvailable, 1); nAvailable > p.min {
 		//decriment
 		atomic.AddUint32(&p.nAvailable, ^uint32(0))
-		p.resClose(wrapper.Resource)
+		p.resClose(ctx, wrapper.Resource)
 		atomic.AddUint32(&p.open, ^uint32(0))
 		return
 	}
@@ -287,17 +301,17 @@ func (p *ResourcePool) releaseAtomic(wrapper *ResourceWrapper) {
  * has gone bad.  A new resource will be created in it's place. once its asked for
  * IE its possible to destroy resources in a pool bellow its min value
  */
-func (p *ResourcePool) destroy(wrapper *ResourceWrapper) {
+func (p *ResourcePool) destroy(ctx context.Context, wrapper *ResourceWrapper) {
 
 	//you can destroy a resource if the pool is closed, no harm no foul
-	p.resClose(wrapper.Resource)
+	p.resClose(ctx, wrapper.Resource)
 	atomic.AddUint32(&p.open, ^uint32(0))
 	wrapper.p = nil
 }
 
 // Remove all resources from the Pool.
 // Then close the pool.
-func (p *ResourcePool) Close() {
+func (p *ResourcePool) Close(ctx context.Context) {
 
 	p.fMutex.Lock()
 	defer p.fMutex.Unlock()
@@ -307,7 +321,7 @@ func (p *ResourcePool) Close() {
 	for {
 		select {
 		case resource := <-p.resources:
-			p.resClose(resource.Resource)
+			p.resClose(ctx, resource.Resource)
 			atomic.AddUint32(&p.nAvailable, ^uint32(0))
 			atomic.AddUint32(&p.open, ^uint32(0))
 		default:
